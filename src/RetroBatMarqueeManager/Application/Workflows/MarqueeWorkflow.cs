@@ -1,0 +1,1885 @@
+using RetroBatMarqueeManager.Core.Interfaces;
+using RetroBatMarqueeManager.Application.Services;
+using RetroBatMarqueeManager.Core.Models.RetroAchievements;
+using System.Collections.Concurrent;
+
+namespace RetroBatMarqueeManager.Application.Workflows
+{
+    public class MarqueeWorkflow : IMarqueeWorkFlow, IDisposable
+    {
+        private readonly IConfigService _config;
+        private readonly ImageConversionService _imageService;
+        private readonly Infrastructure.Processes.MpvController _mpv;
+        private readonly IMarqueeFileFinder _marqueeFinder;
+        private readonly IDmdService _dmdService;
+        private readonly ILogger<MarqueeWorkflow> _logger;
+        private FileSystemWatcher? _watcher;
+        private readonly ConcurrentQueue<string> _eventQueue = new();
+        
+        // State
+        private string? _lastSelectedSystem;
+        private bool _gameRunning = false; // True while game is running
+        private DateTime _ignoreEventsUntil = DateTime.MinValue; // Ignore game-selected events until this time
+        private string? _currentGameSystem; // System of currently running game
+        private string? _currentGameName; // Name of currently running game
+        private string? _currentGameRom; // ROM path of currently running game
+        private bool _mpvSuspendedForPinball = false; // EN: True if MPV was stopped for pinball / FR: Vrai si MPV a été arrêté pour pinball
+
+        private readonly IInputService _inputService;
+        private readonly IProcessService _processService;
+        
+        // EN: Video Offset Management (new services)
+        // FR: Gestion des offsets vidéo (nouveaux services)
+        private readonly VideoMarqueeService _videoService;
+        private readonly VideoOffsetStorageService _videoOffsetStorage;
+        private readonly RetroAchievementsService? _raService; // EN: RetroAchievements Service / FR: Service RetroAchievements
+        
+        // EN: Video adjustment mode state
+        // FR: État du mode ajustement vidéo
+        private bool _isVideoAdjustmentMode = false;
+        private string? _currentVideoPath = null;
+        private string? _currentVideoPreviewFrame = null;
+        private VideoOffsetData _currentVideoOffsets = new VideoOffsetData();
+        private CancellationTokenSource? _badgeCycleCts; // EN: For DMD badge cycling / FR: Pour cycle badges DMD
+        private CancellationTokenSource? _mpvBadgeCycleCts; // EN: For MPV badge cycling / FR: Pour cycle badges MPV
+
+        public MarqueeWorkflow(
+            IConfigService config, 
+            ImageConversionService imageService, 
+            Infrastructure.Processes.MpvController mpv,
+            IMarqueeFileFinder marqueeFinder,
+            IDmdService dmdService,
+            IInputService inputService,
+            IProcessService processService,
+            VideoMarqueeService videoService,
+            VideoOffsetStorageService videoOffsetStorage,
+            ILogger<MarqueeWorkflow> logger,
+            RetroAchievementsService? raService = null)
+        {
+            _config = config;
+            _imageService = imageService;
+            _mpv = mpv;
+            _marqueeFinder = marqueeFinder;
+            _dmdService = dmdService;
+            _inputService = inputService;
+            _processService = processService;
+            _videoService = videoService;
+            _videoOffsetStorage = videoOffsetStorage;
+            _raService = raService;
+            _logger = logger;
+            
+            _inputService.OnMoveCommand += HandleMoveCommand;
+            _inputService.OnScaleCommand += HandleScaleCommand;
+            _inputService.OnVideoAdjustmentMode += HandleVideoAdjustmentMode;
+            _inputService.OnTogglePlayback += HandleTogglePlayback;
+            _inputService.OnTrimStart += () => HandleTrimCommand(true);
+            _inputService.OnTrimEnd += () => HandleTrimCommand(false);
+            
+            // EN: Subscribe to RetroAchievements events / FR: S'abonner aux événements RetroAchievements
+            if (_raService != null)
+            {
+                _raService.AchievementUnlocked += OnAchievementUnlocked;
+                _raService.GameStarted += OnGameStarted;
+                _raService.SetImageConversionService(_imageService); // EN: For grayscale badge generation / FR: Pour génération badge niveaux de gris
+                _logger.LogInformation("[RA Workflow] Subscribed to RetroAchievements events");
+            }
+        }
+
+        // Throttling State
+        private bool _isRendering = false;
+        private int _pendingFanartX = 0;
+        private int _pendingFanartY = 0;
+        private int _pendingLogoX = 0;
+        private int _pendingLogoY = 0;
+        private double _pendingFanartScale = 0.0;
+        private double _pendingLogoScale = 0.0;
+        private bool _isVideoPlaybackMode = false; // EN: True if playing source video for trimming / FR: Vrai si lecture vidéo source pour découpe
+
+        private void HandleMoveCommand(int dx, int dy, bool isLogo)
+        {
+            // EN: Check if in video adjustment mode
+            // FR: Vérifier si en mode ajustement vidéo
+            if (_isVideoAdjustmentMode)
+            {
+                HandleVideoMove(dx, dy, isLogo);
+                return;
+            }
+            
+            // Accumulate input deltas (Image Composition Mode)
+            if (isLogo)
+            {
+                Interlocked.Add(ref _pendingLogoX, dx);
+                Interlocked.Add(ref _pendingLogoY, dy);
+            }
+            else
+            {
+                Interlocked.Add(ref _pendingFanartX, dx);
+                Interlocked.Add(ref _pendingFanartY, dy);
+            }
+
+            // Trigger Render Loop (Fire and Forget)
+            _ = TriggerRender();
+        }
+
+        private void HandleScaleCommand(double delta, bool isLogo)
+        {
+            // EN: Check if in video adjustment mode
+            // FR: Vérifier si en mode ajustement vidéo
+            if (_isVideoAdjustmentMode)
+            {
+                HandleVideoScale(delta, isLogo);
+                return;
+            }
+            
+            // Accumulate scale deltas (Image Composition Mode)
+            if (isLogo)
+            {
+                lock (this) { _pendingLogoScale += delta; }
+            }
+            else
+            {
+                lock (this) { _pendingFanartScale += delta; }
+            }
+
+            // Trigger Render Loop (Fire and Forget)
+            _ = TriggerRender();
+        }
+
+        private async Task TriggerRender()
+        {
+            // If already rendering, the loop will pick up the new accumulated values
+            if (_isRendering) return;
+            
+            _isRendering = true;
+
+            try
+            {
+                while (_pendingFanartX != 0 || _pendingFanartY != 0 || _pendingLogoX != 0 || _pendingLogoY != 0 || _pendingFanartScale != 0.0 || _pendingLogoScale != 0.0)
+                {
+                    // Capture current snapshot
+                    int fDx = Interlocked.Exchange(ref _pendingFanartX, 0);
+                    int fDy = Interlocked.Exchange(ref _pendingFanartY, 0);
+                    int lDx = Interlocked.Exchange(ref _pendingLogoX, 0);
+                    int lDy = Interlocked.Exchange(ref _pendingLogoY, 0);
+                    double fScale, lScale;
+                    lock (this)
+                    {
+                        fScale = _pendingFanartScale;
+                        lScale = _pendingLogoScale;
+                        _pendingFanartScale = 0.0;
+                        _pendingLogoScale = 0.0;
+                    }
+
+                    string? newPath = null;
+
+                    // Apply Fanart Scale
+                    if (fScale != 0.0)
+                    {
+                        newPath = await _marqueeFinder.RefreshScaleAsync(fScale, false);
+                    }
+
+                    // Apply Logo Scale
+                    if (lScale != 0.0)
+                    {
+                        newPath = await _marqueeFinder.RefreshScaleAsync(lScale, true) ?? newPath;
+                    }
+
+                    // Apply Fanart Updates
+                    if (fDx != 0 || fDy != 0)
+                    {
+                        newPath = await _marqueeFinder.RefreshCompositionAsync(fDx, fDy, false) ?? newPath;
+                    }
+
+                    // Apply Logo Updates (might override newPath, but result is the same final composition)
+                    if (lDx != 0 || lDy != 0)
+                    {
+                        newPath = await _marqueeFinder.RefreshCompositionAsync(lDx, lDy, true);
+                    }
+
+                    if (!string.IsNullOrEmpty(newPath))
+                    {
+                        await _mpv.DisplayImage(newPath);
+
+                        // EN: Also refresh DMD if Composition is enabled
+                        // FR: Rafraîchir aussi le DMD si la composition est activée
+                        if (_config.DmdEnabled && _config.DmdCompose && !string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+                        {
+                            var romName = !string.IsNullOrEmpty(_currentGameRom) ? Path.GetFileNameWithoutExtension(_currentGameRom) : "";
+                            var dmdPath = await _marqueeFinder.FindDmdImageAsync(_currentGameSystem, _currentGameName, romName);
+                            if (dmdPath != null) await _dmdService.PlayAsync(dmdPath);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Error in Render Loop: {ex.Message}");
+            }
+            finally
+            {
+                _isRendering = false;
+                
+                // Double check if new input arrived while we were exiting
+                if (_pendingFanartX != 0 || _pendingFanartY != 0 || _pendingLogoX != 0 || _pendingLogoY != 0)
+                {
+                     _ = TriggerRender();
+                }
+            }
+        }
+
+        // ========== VIDEO ADJUSTMENT MODE HANDLERS ==========
+
+        /// <summary>
+        /// EN: Handle Ctrl+V to enter video adjustment mode
+        /// FR: Gérer Ctrl+V pour entrer en mode ajustement vidéo
+        /// </summary>
+        private async void HandleVideoAdjustmentMode()
+        {
+            // EN: Can only adjust if game is running and video is being displayed
+            // FR: Ajustement possible uniquement si jeu en cours et vidéo affichée
+            if (!_gameRunning || string.IsNullOrEmpty(_currentVideoPath))
+            {
+                _logger.LogWarning("[VideoAdjustment] Cannot enter video adjustment mode: No game running or video playing");
+                return;
+            }
+
+            // EN: Verify system and game name are available
+            // FR: Vérifier que system et nom du jeu sont disponibles
+            if (string.IsNullOrEmpty(_currentGameSystem) || string.IsNullOrEmpty(_currentGameName))
+            {
+                _logger.LogWarning("[VideoAdjustment] Cannot enter video adjustment mode: Missing system or game name");
+                return;
+            }
+
+            // EN: Check if current video is a generated marquee video
+            // FR: Vérifier si la vidéo actuelle est une marquee générée
+            if (!_videoService.IsGeneratedVideo(_currentVideoPath))
+            {
+                _logger.LogWarning($"[VideoAdjustment] Current video is not a generated marquee: {_currentVideoPath}");
+                return;
+            }
+
+            _logger.LogInformation($"[VideoAdjustment] Entering video adjustment mode for: {_currentVideoPath}");
+            _isVideoAdjustmentMode = true;
+            _isVideoPlaybackMode = false; // Always start in preview mode
+
+            // EN: Load global offsets as starting point (or initialize with video generation defaults)
+            // FR: Charger les offsets globaux comme point de départ (ou initialiser avec valeurs par défaut de génération vidéo)
+            _currentVideoOffsets = _videoOffsetStorage.GetGlobalOffsets(_currentGameSystem, _currentGameName);
+            
+            // EN: IMPORTANT: If logo position is 0,0, set to default 10,10 (video generation default)
+            // FR: IMPORTANT: Si position logo est 0,0, définir à 10,10 par défaut (défaut génération vidéo)
+            // This ensures the logo appears in the same position as when the video was originally generated
+            if (_currentVideoOffsets.LogoX == 0 && _currentVideoOffsets.LogoY == 0)
+            {
+                _logger.LogInformation("[VideoAdjustment] Setting logo to default position 10,10");
+                _currentVideoOffsets.LogoX = 10;
+                _currentVideoOffsets.LogoY = 10;
+            }
+
+            // EN: Find SOURCE video (not the generated one) to capture full-size frame
+            // FR: Trouver la vidéo SOURCE (pas celle générée) pour capturer frame plein format
+            var romFileName = Path.GetFileNameWithoutExtension(_currentVideoPath);
+            var sourceVideoPath = _marqueeFinder.FindGameLogo(_currentGameSystem, _currentGameName, romFileName, raw: true);
+            
+            // EN: Try to find the source video in standard locations
+            // FR: Essayer de trouver la vidéo source dans les emplacements standard
+            string? videoSourcePath = null;
+            var searchDirs = new List<string>
+            {
+                Path.Combine(_config.RomsPath, _currentGameSystem, "videos"),
+                Path.Combine(_config.RomsPath, _currentGameSystem, "video"),
+                Path.Combine(_config.RomsPath, _currentGameSystem, "images")
+            };
+            
+            var videoExts = new[] { ".mp4", ".avi", ".webm", ".mkv", ".mov" };
+            foreach (var dir in searchDirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+                
+                foreach (var ext in videoExts)
+                {
+                    var testPath = Path.Combine(dir, romFileName + "-video" + ext);
+                    if (File.Exists(testPath))
+                    {
+                        videoSourcePath = testPath;
+                        break;
+                    }
+                    
+                    testPath = Path.Combine(dir, romFileName + ext);
+                    if (File.Exists(testPath))
+                    {
+                        videoSourcePath = testPath;
+                        break;
+                    }
+                }
+                
+                if (videoSourcePath != null) break;
+            }
+            
+            if (string.IsNullOrEmpty(videoSourcePath))
+            {
+                _logger.LogWarning($"[VideoAdjustment] Source video not found, using generated video for capture (may be cropped)");
+                videoSourcePath = _currentVideoPath;
+            }
+            else
+            {
+                _logger.LogInformation($"[VideoAdjustment] Found source video: {videoSourcePath}");
+            }
+
+            // EN: Capture frame from SOURCE video for preview
+            // FR: Capturer une frame de la vidéo SOURCE pour l'aperçu
+            _currentVideoPreviewFrame = _videoService.CaptureVideoFrame(videoSourcePath, 5.0);
+            
+            if (string.IsNullOrEmpty(_currentVideoPreviewFrame))
+            {
+                _logger.LogError("[VideoAdjustment] Failed to capture video frame");
+                _isVideoAdjustmentMode = false;
+                return;
+            }
+
+            // EN: Generate preview with logo overlay
+            // FR: Générer l'aperçu avec overlay du logo
+            await RefreshVideoPreview();
+
+            // EN: Display OSD Helper for Shortcuts
+            // FR: Afficher l'aide OSD pour les raccourcis
+            var osdCmd = System.Text.Json.JsonSerializer.Serialize(new { 
+                command = new[] { 
+                    "show-text", 
+                    "Adjustment Mode:\\nCtrl+P: Play/Pause\\nCtrl+I: In (Start)\\nCtrl+O: Out (End)\\nArrows: Move\\nCtrl+N/B: Zoom", 
+                    "10000" // Display for 10 seconds
+                } 
+            });
+            await _mpv.SendCommandAsync(osdCmd);
+        }
+
+        /// <summary>
+        /// EN: Handle move command in video adjustment mode
+        /// FR: Gérer la commande de déplacement en mode ajustement vidéo
+        /// </summary>
+        private async void HandleVideoMove(int dx, int dy, bool isLogo)
+        {
+            if (isLogo)
+            {
+                _currentVideoOffsets.LogoX += dx;
+                _currentVideoOffsets.LogoY += dy;
+                _logger.LogInformation($"[VideoAdjustment] Logo moved: ({_currentVideoOffsets.LogoX}, {_currentVideoOffsets.LogoY})");
+            }
+            else
+            {
+                _currentVideoOffsets.CropX += dx;
+                _currentVideoOffsets.CropY += dy;
+                _logger.LogInformation($"[VideoAdjustment] Crop moved: ({_currentVideoOffsets.CropX}, {_currentVideoOffsets.CropY})");
+            }
+
+
+            // EN: Update global offsets storage
+            // FR: Mettre à jour le stockage des offsets globaux
+            if (!string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+            {
+                _videoOffsetStorage.UpdateGlobalOffsets(_currentGameSystem, _currentGameName, _currentVideoOffsets);
+            }
+
+            // EN: Refresh preview
+            // FR: Rafraîchir l'aperçu
+            await RefreshVideoPreview();
+        }
+
+        /// <summary>
+        /// EN: Handle scale command in video adjustment mode
+        /// FR: Gérer la commande de zoom en mode ajustement vidéo
+        /// </summary>
+        private async void HandleVideoScale(double delta, bool isLogo)
+        {
+            if (isLogo)
+            {
+                _currentVideoOffsets.LogoScale = Math.Max(0.1, Math.Min(5.0, _currentVideoOffsets.LogoScale + delta));
+                _logger.LogInformation($"[VideoAdjustment] Logo scale: {_currentVideoOffsets.LogoScale:F2}");
+            }
+            else
+            {
+                _currentVideoOffsets.Zoom = Math.Max(0.5, Math.Min(3.0, _currentVideoOffsets.Zoom + delta));
+                _logger.LogInformation($"[VideoAdjustment] Video zoom: {_currentVideoOffsets.Zoom:F2}");
+            }
+
+            // EN: Update global offsets storage
+            // FR: Mettre à jour le stockage des offsets globaux
+            if (!string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+            {
+                _videoOffsetStorage.UpdateGlobalOffsets(_currentGameSystem, _currentGameName, _currentVideoOffsets);
+            }
+
+            // EN: Refresh preview
+            // FR: Rafraîchir l'aperçu
+            await RefreshVideoPreview();
+        }
+
+        /// <summary>
+        /// EN: Refresh video preview with current offsets applied to frame + logo overlay
+        /// FR: Rafraîchir l'aperçu vidéo avec offsets appliqués à la frame + overlay logo
+        /// </summary>
+        private async Task RefreshVideoPreview()
+        {
+            if (string.IsNullOrEmpty(_currentVideoPreviewFrame) || string.IsNullOrEmpty(_currentGameSystem) || string.IsNullOrEmpty(_currentGameName))
+            {
+                _logger.LogWarning($"[VideoAdjustment] Cannot refresh preview: Frame={!string.IsNullOrEmpty(_currentVideoPreviewFrame)}, System={!string.IsNullOrEmpty(_currentGameSystem)}, Game={!string.IsNullOrEmpty(_currentGameName)}");
+                return;
+            }
+
+            // EN: If in Playback Mode, play the SOURCE video directly
+            // FR: Si en Mode Lecture, jouer la vidéo SOURCE directement
+            if (_isVideoPlaybackMode)
+            {
+                var romFileName = Path.GetFileNameWithoutExtension(_currentVideoPath) ?? "";
+                var logoPath = _marqueeFinder.FindGameLogo(_currentGameSystem, _currentGameName, romFileName, raw: true);
+                var searchDirs = new List<string>
+                {
+                    Path.Combine(_config.RomsPath, _currentGameSystem, "videos"),
+                    Path.Combine(_config.RomsPath, _currentGameSystem, "video"),
+                    Path.Combine(_config.RomsPath, _currentGameSystem, "images")
+                };
+                
+                string? videoSourcePath = null;
+                var videoExts = new[] { ".mp4", ".avi", ".webm", ".mkv", ".mov" };
+                foreach (var dir in searchDirs)
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    foreach (var ext in videoExts)
+                    {
+                        var testPath = Path.Combine(dir, romFileName + "-video" + ext);
+                        if (File.Exists(testPath)) { videoSourcePath = testPath; break; }
+                        testPath = Path.Combine(dir, romFileName + ext);
+                        if (File.Exists(testPath)) { videoSourcePath = testPath; break; }
+                    }
+                    if (videoSourcePath != null) break;
+                }
+                
+                if (!string.IsNullOrEmpty(videoSourcePath))
+                {
+                     // Play source video looping
+                     await _mpv.DisplayImage(videoSourcePath, loop: true);
+                     // FR: Activer la barre de progression (OSC) pour visualiser le trimming
+                     await _mpv.SendCommandAsync($"{{\"command\":[\"script-message\", \"osc-visibility\", \"always\", \"no-osd\"]}}");
+                     await _mpv.SendCommandAsync($"{{\"command\":[\"show-text\", \"Playback Mode - Press I/O to Trim\", 3000]}}");
+                     return;
+                }
+            }
+            else
+            {
+                // FR: Désactiver l'OSC si on quitte le mode lecture
+                await _mpv.SendCommandAsync($"{{\"command\":[\"script-message\", \"osc-visibility\", \"never\", \"no-osd\"]}}");
+            }
+
+            _logger.LogInformation($"[VideoAdjustment] RefreshVideoPreview called with offsets: Crop({_currentVideoOffsets.CropX},{_currentVideoOffsets.CropY}), Zoom={_currentVideoOffsets.Zoom:F2}");
+
+            try
+            {
+                // EN: Find logo using MarqueeFinder's logic (same as all other media)
+                // FR: Trouver le logo en utilisant la logique de MarqueeFinder (comme tous les autres médias)
+                var romFileName = Path.GetFileNameWithoutExtension(_currentVideoPath) ?? "";
+                var logoPath = _marqueeFinder.FindGameLogo(_currentGameSystem, _currentGameName, romFileName, raw: true);
+
+                if (string.IsNullOrEmpty(logoPath))
+                {
+                    _logger.LogWarning($"[VideoAdjustment] Logo not found for {romFileName}, displaying frame only");
+                    await _mpv.DisplayImage(_currentVideoPreviewFrame);
+                    return;
+                }
+
+                _logger.LogInformation($"[VideoAdjustment] Composing: frame={Path.GetFileName(_currentVideoPreviewFrame)}, logo={Path.GetFileName(logoPath)}");
+
+                // EN: Compose frame + logo with current offsets using ImageMagick (same as MarqueeCompose)
+                // FR: Composer frame + logo avec offsets actuels via ImageMagick (comme MarqueeCompose)
+                var composedPath = _imageService.GenerateComposition(
+                    fanartPath: _currentVideoPreviewFrame,
+                    logoPath: logoPath,
+                    subFolder: "video_preview",
+                    offsetX: _currentVideoOffsets.CropX,
+                    offsetY: _currentVideoOffsets.CropY,
+                    logoOffsetX: _currentVideoOffsets.LogoX,
+                    logoOffsetY: _currentVideoOffsets.LogoY,
+                    fanartScale: _currentVideoOffsets.Zoom,
+                    logoScale: _currentVideoOffsets.LogoScale,
+                    isPreview: true
+                );
+
+                if (!string.IsNullOrEmpty(composedPath) && File.Exists(composedPath))
+                {
+                    await _mpv.DisplayImage(composedPath);
+                    _logger.LogInformation($"[VideoAdjustment] ✓ Preview refreshed successfully");
+                }
+                else
+                {
+                    _logger.LogWarning("[VideoAdjustment] GenerateComposition returned null/invalid path");
+                    await _mpv.DisplayImage(_currentVideoPreviewFrame);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[VideoAdjustment] Exception: {ex.Message}");
+                _logger.LogError($"[VideoAdjustment] Stack: {ex.StackTrace}");
+                await _mpv.DisplayImage(_currentVideoPreviewFrame);
+            }
+        }
+
+        /// <summary>
+        /// EN: Check if video offsets exist and trigger regeneration if needed
+        /// FR: Vérifier si des offsets vidéo existent et déclencher la régénération si nécessaire
+        /// </summary>
+        private void CheckAndTriggerVideoRegeneration(string system, string gameName)
+        {
+            try
+            {
+                // EN: Check if global video offsets exist for this game
+                // FR: Vérifier si des offsets vidéo globaux existent pour ce jeu
+                var offsets = _videoOffsetStorage.GetGlobalOffsets(system, gameName);
+                
+                // EN: Check if any offset is non-default (not all zeros and zoom=1)
+                // FR: Vérifier si un offset est non-par-défaut (pas tous zeros et zoom=1)
+                bool hasCustomOffsets = offsets.CropX != 0 || offsets.CropY != 0 || 
+                                       Math.Abs(offsets.Zoom - 1.0) > 0.01 ||
+                                       offsets.LogoX != 10 || offsets.LogoY != 10 ||
+                                       Math.Abs(offsets.LogoScale - 1.0) > 0.01 ||
+                                       offsets.StartTime > 0.01 || offsets.EndTime > 0.01;
+                
+                if (!hasCustomOffsets)
+                {
+                    return; // No custom offsets, nothing to do
+                }
+                
+                _logger.LogInformation($"[VideoRegen] Custom offsets detected for {gameName}");
+                
+                // EN: Check if individual offset marker exists and compare with current offsets
+                // FR: Vérifier si le marqueur d'offset individuel existe et comparer avec offsets actuels
+                var individualOffsets = _videoOffsetStorage.GetIndividualOffsets(system, gameName);
+                if (individualOffsets != null)
+                {
+                    // EN: Compare individual (last regenerated) with global (current desired)
+                    // FR: Comparer individuels (dernière régénération) avec globaux (actuels désirés)
+                    bool offsetsMatch = individualOffsets.CropX == offsets.CropX &&
+                                       individualOffsets.CropY == offsets.CropY &&
+                                       Math.Abs(individualOffsets.Zoom - offsets.Zoom) < 0.01 &&
+                                       individualOffsets.LogoX == offsets.LogoX &&
+                                       individualOffsets.LogoY == offsets.LogoY &&
+                                       Math.Abs(individualOffsets.LogoScale - offsets.LogoScale) < 0.01 &&
+                                       Math.Abs(individualOffsets.StartTime - offsets.StartTime) < 0.1 &&
+                                       Math.Abs(individualOffsets.EndTime - offsets.EndTime) < 0.1;
+                    
+                    if (offsetsMatch)
+                    {
+                        _logger.LogInformation($"[VideoRegen] Offsets unchanged, video already regenerated");
+                        return;
+                    }
+                    else
+                    {
+                        _logger.LogInformation($"[VideoRegen] Offsets changed since last regeneration, regenerating");
+                    }
+                }
+                
+                // EN: Find and delete the generated video to force regeneration
+                // FR: Trouver et supprimer la vidéo générée pour forcer la régénération
+                var subFolder = _config.GenerateMarqueeVideoFolder;
+                if (string.IsNullOrWhiteSpace(subFolder)) subFolder = "generated_videos";
+                
+                var parentDir = Directory.GetParent(_config.CachePath);
+                if (parentDir == null) return;
+                
+                // EN: IMPORTANT: Use exact ROM filename to match video generation logic
+                // FR: IMPORTANT: Utiliser le nom exact du fichier ROM pour correspondre à la logique de génération vidéo
+                // gameName now contains the full ROM filename (e.g., "After Burner Complete (Europe)")
+                var systemVideoDir = Path.Combine(parentDir.FullName, subFolder, system);
+                if (!Directory.Exists(systemVideoDir))
+                {
+                    _logger.LogInformation($"[VideoRegen] Video directory doesn't exist yet: {systemVideoDir}");
+                    return;
+                }
+                
+                // EN: Find source video and logo to regenerate with new offsets
+                // FR: Trouver vidéo source et logo pour régénérer avec nouveaux offsets
+                var romFileName = gameName;
+                var sourceVideoPath = _marqueeFinder.FindGameLogo(system, gameName, romFileName, raw: true);
+                
+                // EN: Try to find source video
+                // FR: Essayer de trouver vidéo source
+                var searchDirs = new List<string>
+                {
+                    Path.Combine(_config.RomsPath, system, "videos"),
+                    Path.Combine(_config.RomsPath, system, "video")
+                };
+                
+                string? videoSource = null;
+                var videoExts = new[] { ".mp4", ".avi", ".webm", ".mkv", ".mov" };
+                foreach (var dir in searchDirs)
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    
+                    foreach (var ext in videoExts)
+                    {
+                        var testPath = Path.Combine(dir, romFileName + "-video" + ext);
+                        if (File.Exists(testPath)) { videoSource = testPath; break; }
+                        
+                        testPath = Path.Combine(dir, romFileName + ext);
+                        if (File.Exists(testPath)) { videoSource = testPath; break; }
+                    }
+                    if (videoSource != null) break;
+                }
+                
+                if (string.IsNullOrEmpty(videoSource))
+                {
+                    _logger.LogWarning($"[VideoRegen] Source video not found for {gameName}, cannot regenerate");
+                    return;
+                }
+                
+                // EN: Find logo
+                // FR: Trouver logo
+                var logoPath = _marqueeFinder.FindGameLogo(system, gameName, romFileName, raw: true);
+                if (string.IsNullOrEmpty(logoPath))
+                {
+                    _logger.LogWarning($"[VideoRegen] Logo not found for {gameName}, regenerating without logo");
+                }
+                
+                // EN: Delete old video and regenerate with custom offsets
+                // FR: Supprimer ancienne vidéo et régénérer avec offsets personnalisés
+                var videoPath = Path.Combine(systemVideoDir, $"{gameName}.mp4");
+                if (File.Exists(videoPath))
+                {
+                    _logger.LogInformation($"[VideoRegen] Deleting old video: {videoPath}");
+                    File.Delete(videoPath);
+                }
+                
+                _logger.LogInformation($"[VideoRegen] Regenerating video with offsets for {gameName}...");
+                var result = _imageService.GenerateMarqueeVideoWithOffsets(
+                    videoSource, logoPath ?? "", system, gameName,
+                    offsets.CropX, offsets.CropY, offsets.Zoom,
+                    offsets.LogoX, offsets.LogoY, offsets.LogoScale,
+                    offsets.StartTime, offsets.EndTime
+                );
+                
+                if (!string.IsNullOrEmpty(result))
+                {
+                    _logger.LogInformation($"[VideoRegen] Successfully regenerated: {result}");
+                    // EN: Create individual offset marker to prevent future regenerations
+                    // FR: Créer marqueur d'offset individuel pour éviter futures régénérations
+                    _videoOffsetStorage.SaveIndividualOffsets(system, gameName, offsets);
+                    _logger.LogInformation($"[VideoRegen] Created individual offset marker");
+                }
+                else
+                {
+                    _logger.LogError($"[VideoRegen] Failed to regenerate video with offsets");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[VideoRegen] Error checking/triggering regeneration: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// EN: Toggle between Static Preview and Source Video Playback for Trimming
+        /// FR: Basculer entre Aperçu Statique et Lecture Vidéo Source pour la Découpe
+        /// </summary>
+        private async void HandleTogglePlayback()
+        {
+            if (!_isVideoAdjustmentMode) return;
+            
+            _isVideoPlaybackMode = !_isVideoPlaybackMode;
+            _logger.LogInformation($"[VideoAdjustment] Toggle Playback: {_isVideoPlaybackMode}");
+            
+            await RefreshVideoPreview();
+        }
+
+        /// <summary>
+        /// EN: Handle Trim Start/End commands
+        /// FR: Gérer les commandes de début/fin de découpe
+        /// </summary>
+        private async void HandleTrimCommand(bool isStart)
+        {
+            if (!_isVideoAdjustmentMode || !_isVideoPlaybackMode)
+            {
+                // Can only trim while playing
+                // FR: Découpe possible uniquement en lecture
+                return;
+            }
+
+            double currentTime = await _mpv.GetCurrentTime();
+            
+            if (isStart)
+            {
+                _currentVideoOffsets.StartTime = currentTime;
+                _logger.LogInformation($"[VideoAdjustment] Start Time Set: {currentTime:F2}s");
+                await _mpv.SendCommandAsync($"{{\"command\":[\"show-text\", \"Start Time: {currentTime:F2}s\", 2000]}}");
+            }
+            else
+            {
+                _currentVideoOffsets.EndTime = currentTime;
+                _logger.LogInformation($"[VideoAdjustment] End Time Set: {currentTime:F2}s");
+                await _mpv.SendCommandAsync($"{{\"command\":[\"show-text\", \"End Time: {currentTime:F2}s\", 2000]}}");
+            }
+            
+             // EN: Update global offsets storage
+             // FR: Mettre à jour le stockage des offsets globaux
+             if (!string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+             {
+                 _videoOffsetStorage.UpdateGlobalOffsets(_currentGameSystem, _currentGameName, _currentVideoOffsets);
+             }
+        }
+
+        // ========== END VIDEO ADJUSTMENT MODE  ==========
+
+        public void Start()
+        {
+            // Initialize DMD
+            _dmdService.InitializeAsync().Wait();
+
+            // Start IPC Listener
+            _ = Task.Run(StartIpcListener);
+
+            var eventFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ESEvent.arg"); // Usually in root of plugin
+            
+            var dir = Path.GetDirectoryName(eventFile);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+
+            _watcher = new FileSystemWatcher(dir, "ESEvent.arg")
+            {
+                NotifyFilter = NotifyFilters.LastWrite,
+                EnableRaisingEvents = true
+            };
+            _watcher.Changed += OnFileChanged;
+            _logger.LogInformation($"Watching for events at {eventFile}");
+        }
+
+        private async Task StartIpcListener()
+        {
+            const string PipeName = "RetroBatMarqueeManagerPipe";
+            _logger.LogInformation($"Starting IPC Listener on pipe: {PipeName}");
+
+            while (true)
+            {
+                try
+                {
+                    using var server = new System.IO.Pipes.NamedPipeServerStream(PipeName, System.IO.Pipes.PipeDirection.In);
+                    await server.WaitForConnectionAsync();
+                    
+                    using var reader = new StreamReader(server);
+                    var message = await reader.ReadToEndAsync();
+                    
+                    if (!string.IsNullOrEmpty(message))
+                    {
+                        await ProcessIpcMessageAsync(message);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"IPC Server Error: {ex.Message}");
+                    await Task.Delay(1000); // Prevent tight loop on error
+                }
+            }
+        }
+
+        private async Task ProcessIpcMessageAsync(string message)
+        {
+            _logger.LogInformation($"IPC Raw: {message}");
+
+            // Format: command|p1|p2|p3...
+            var parts = message.Split('|');
+            if (parts.Length == 0) return;
+
+            var eventName = parts[0];
+            var p1 = parts.Length > 1 ? parts[1] : "";
+            var p2 = parts.Length > 2 ? parts[2] : "";
+            var p3 = parts.Length > 3 ? parts[3] : "";
+            var p4 = parts.Length > 4 ? parts[4] : "";
+            
+            await ProcessEventAsync(eventName, p1, p2, p3, p4);
+        }
+
+        private async void OnFileChanged(object sender, FileSystemEventArgs e)
+        {
+             // Retry Loop for File Access
+             int retries = 5;
+             while (retries > 0)
+             {
+                 try 
+                 {
+                    // Revert to UTF-8 as batch file is now sending UTF-8
+                    using var stream = new FileStream(e.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var reader = new StreamReader(stream); // Default is UTF-8
+                    var content = await reader.ReadToEndAsync();
+                    
+                    if (!string.IsNullOrWhiteSpace(content))
+                    {
+                        await ProcessEventStringAsync(content);
+                        return; // Success
+                    }
+                 }
+                 catch (IOException)
+                 {
+                    retries--;
+                    await Task.Delay(100); // Wait and retry
+                 }
+                 catch (Exception ex)
+                 {
+                    _logger.LogError($"Error reading event file: {ex.Message}");
+                    return;
+                 }
+             }
+             _logger.LogError("Failed to read ESEvent.arg after multiple retries.");
+        }
+
+        private async Task ProcessEventStringAsync(string content)
+        {
+            // Robust Parsing handling Quotes and Brackets from log: system-selected [_platform" ]
+            var dict = new Dictionary<string, string>();
+            
+            foreach(var part in content.Split('&'))
+            {
+               var kvp = part.Split('=');
+               if (kvp.Length == 2) 
+               {
+                   var key = kvp[0].Trim();
+                   var val = kvp[1].Trim();
+                   val = val.Trim(' ', '"', '[', ']', '\r', '\n', '\t');
+                   val = DecodeEsString(val);
+                   dict[key] = val;
+               }
+            }
+
+            var evt = dict.ContainsKey("event") ? dict["event"] : "";
+            var p1 = dict.ContainsKey("param1") ? dict["param1"] : "";
+            var p2 = dict.ContainsKey("param2") ? dict["param2"] : "";
+            var p3 = dict.ContainsKey("param3") ? dict["param3"] : "";
+            var p4 = dict.ContainsKey("param4") ? dict["param4"] : ""; // ROM path
+
+            await ProcessEventAsync(evt, p1, p2, p3, p4);
+        }
+
+        private string DecodeEsString(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return input;
+            return input
+                .Replace("|v", ",")
+                .Replace("|c", ":") 
+                .Replace("|q", "\""); 
+        }
+
+        public async Task ProcessEventAsync(string eventName, string param1, string param2, string param3, string param4)
+        {
+            _logger.LogInformation($"Event: {eventName} [p1:{param1}] [p2:{param2}] [p3:{param3}] [p4:{param4}]");
+
+            switch (eventName)
+            {
+                case "game-selected":
+                    await HandleGameSelected(param1, param3, param2);
+                    break;
+                case "system-selected":
+                    await HandleSystemSelected(param1);
+                    break;
+                case "game-start":
+                    await HandleGameStart(param1, param2, param3);
+                    break;
+                case "game-end":
+                    _logger.LogInformation("Game ended. Checking for GAME OVER screen...");
+
+                    // EN: Explicitly reset RA state on game end
+                    // FR: Réinitialiser explicitement l'état RA à la fin du jeu
+                    _raService?.ResetState();
+
+                    // EN: Remove RA Score and Badge Ribbon Overlays
+                    // FR: Supprimer overlays RA Score et Bandeau de badges
+                    await _mpv.RemoveOverlay(cancelTimer: true);
+                    _badgeCycleCts?.Cancel(); // EN: Stop DMD badge cycle / FR: Arrêter cycle badges DMD
+                    _mpvBadgeCycleCts?.Cancel(); // EN: Stop MPV badge cycle / FR: Arrêter cycle badges MPV
+                    _dmdService.ClearOverlay(); // EN: Clear badge ribbon overlay / FR: Effacer overlay bandeau de badges
+                    
+                    // EN: Cleanup composed MPV overlay files / FR: Nettoyer fichiers overlays MPV composés
+                    try
+                    {
+                        string overlayFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "overlays");
+                        if (Directory.Exists(overlayFolder))
+                        {
+                            var composedFiles = Directory.GetFiles(overlayFolder, "composed_mpv_*.png");
+                            foreach (var file in composedFiles)
+                            {
+                                try { File.Delete(file); } catch { }
+                            }
+                            if (composedFiles.Length > 0)
+                            {
+                                _logger.LogInformation($"[RA Cleanup] Deleted {composedFiles.Length} composed overlay files");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning($"[RA Cleanup] Error cleaning overlay files: {ex.Message}");
+                    }
+
+                    // Resume DMD for game or system
+                     // Display DMD Game Over if found
+                     var dmdGameOver = _marqueeFinder.FindDmdGameOverMarquee();
+                     if (dmdGameOver != null)
+                     {
+                         _logger.LogInformation($"Playing DMD Game Over: {dmdGameOver}");
+                         await _dmdService.PlayAsync(dmdGameOver);
+                     }
+                     else if (!string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+                     {
+                          // Resume DMD for game or system (Fallback)
+                          // Fix: Block generated videos on game-end (treat as browsing) to prevent "generated gif" reuse
+                          var dmdFile = await _marqueeFinder.FindDmdImageAsync(_currentGameSystem, _currentGameName, _currentGameRom != null ? Path.GetFileNameWithoutExtension(_currentGameRom) : "", allowVideo: false);
+                          if (dmdFile != null) await _dmdService.PlayAsync(dmdFile, _currentGameSystem, _currentGameName);
+                     }
+                    
+                    bool gameOverDisplayed = false;
+
+                    // GAME OVER composition
+                    if (_config.MarqueeCompose)
+                    {
+                        var composedPath = _marqueeFinder.FindGameOverMarquee();
+                        if (!string.IsNullOrEmpty(composedPath) && File.Exists(composedPath))
+                        {
+                            await _mpv.DisplayImage(composedPath);
+                            _logger.LogInformation($"Displayed GAME OVER composition: {composedPath}");
+                            gameOverDisplayed = true;
+                        }
+                    }
+
+                    if (!gameOverDisplayed)
+                    {
+                        // Fallback: Restore the game's marquee
+                        if (!string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+                        {
+                            var gameMarquee = await _marqueeFinder.FindMarqueeFileAsync("game-selected", 
+                                _currentGameSystem, 
+                                _currentGameName, 
+                                _currentGameName, 
+                                _currentGameRom ?? "");
+                            
+                            if (gameMarquee != null)
+                            {
+                                await _mpv.DisplayImage(gameMarquee);
+                                _logger.LogInformation($"Restored game marquee (Fallback): {gameMarquee}");
+                            }
+                            else
+                            {
+                                await HandleSystemSelected(_currentGameSystem);
+                            }
+                        }
+                        else if (!string.IsNullOrEmpty(_lastSelectedSystem))
+                        {
+                            await HandleSystemSelected(_lastSelectedSystem);
+                        }
+                    }
+                    
+                    // EN: VIDEO REGENERATION - Check if offsets changed and regenerate if needed
+                    // FR: RÉGÉNÉRATION VIDÉO - Vérifier si offsets changés et régénérer si besoin
+                    if (_isVideoAdjustmentMode && !string.IsNullOrEmpty(_currentVideoPath) && 
+                        !string.IsNullOrEmpty(_currentGameSystem) && !string.IsNullOrEmpty(_currentGameName))
+                    {
+                        _logger.LogInformation("[VideoAdjustment] Exiting video adjustment mode - checking for regeneration");
+                        
+                        // EN: Check if offsets have changed compared to individual file
+                        // FR: Vérifier si les offsets ont changé par rapport au fichier individuel
+                        if (_videoService.IsGeneratedVideo(_currentVideoPath) && 
+                            _videoOffsetStorage.HasOffsetsChanged(_currentGameSystem, _currentGameName))
+                        {
+                            _logger.LogInformation($"[VideoRegeneration] Offsets changed for {_currentGameSystem}/{_currentGameName} - regenerating video");
+                            
+                            // EN: Find source video and logo for regeneration
+                            // FR: Trouver la vidéo source et le logo pour régénération
+                            // TODO: Store source video path for regeneration (for now, skip regeneration)
+                            // User will need to trigger regeneration on next game-start
+                            _logger.LogWarning("[VideoRegeneration] Video will be regenerated on next game-start");
+                        }
+                    }
+                    
+                    // EN: Reset video adjustment state
+                    // FR: Réinitialiser l'état d'ajustement vidéo
+                    _isVideoAdjustmentMode = false;
+                    _currentVideoPath = null;
+                    _currentVideoPreviewFrame = null;
+                    
+                    _gameRunning = false;
+                    _ignoreEventsUntil = DateTime.Now.AddSeconds(3); // Ignore events for 3 seconds
+                    _currentGameSystem = null;
+                    _currentGameName = null;
+                    _currentGameRom = null;
+                    
+                    // EN: Restart MPV if it was suspended for pinball
+                    // FR: Redémarrer MPV s'il a été suspendu pour le pinball
+                    if (_mpvSuspendedForPinball)
+                    {
+                        _logger.LogInformation("[Pinball] Restarting MPV after pinball game...");
+                        _mpvSuspendedForPinball = false;
+                        _mpv.StartMpv();
+                        // Display default/system marquee
+                        if (!string.IsNullOrEmpty(_lastSelectedSystem))
+                        {
+                            var systemMarquee = await _marqueeFinder.FindMarqueeFileAsync("system-selected", _lastSelectedSystem, "", "", "");
+                            if (systemMarquee != null)
+                            {
+                                await _mpv.DisplayImage(systemMarquee);
+                            }
+                        }
+                    }
+                    break;
+            }
+        }
+
+        private async Task HandleSystemSelected(string systemName)
+        {
+            _lastSelectedSystem = systemName;
+            _logger.LogInformation($"Processing System Selected: {systemName}");
+            
+            // DMD Logic for System
+            // DMD Logic for System
+            var systemDmd = await _marqueeFinder.FindDmdImageAsync(systemName, systemName, "");
+            
+            // Marquee Logic
+            var marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("system-selected", systemName, "", "", "");
+
+            var tasks = new List<Task>();
+
+            if (systemDmd != null) 
+            {
+                tasks.Add(_dmdService.PlayAsync(systemDmd, systemName, systemName));
+            }
+            else 
+            {
+                // EN: Load default DMD media instead of closing
+                // FR: Charger le média DMD par défaut au lieu de fermer
+                _logger.LogWarning($"DMD System Lookup Failed for '{systemName}'. Loading default DMD media.");
+                tasks.Add(_dmdService.PlayAsync(_config.DefaultDmdPath));
+            }
+            
+            if (marqueeFile != null)
+            {
+                tasks.Add(_mpv.DisplayImage(marqueeFile).ContinueWith(t => _logger.LogInformation($"Displayed system marquee: {marqueeFile}")));
+            }
+            else
+            {
+                _logger.LogWarning($"No system marquee found for {systemName}, using default");
+                tasks.Add(_mpv.DisplayImage(_config.DefaultImagePath, loop: true));
+            }
+
+            await Task.WhenAll(tasks);
+        }
+
+        private async Task HandleGameStart(string romPath, string romFileName, string gameName)
+        {
+            _logger.LogInformation($"Game starting: {gameName} ({romPath})");
+            
+            
+            string? system = null;
+            if (!string.IsNullOrEmpty(romPath))
+            {
+                var romsIndex = romPath.IndexOf("\\roms\\", StringComparison.OrdinalIgnoreCase);
+                if (romsIndex >= 0)
+                {
+                    var afterRoms = romPath.Substring(romsIndex + 6);
+                    var nextSlash = afterRoms.IndexOf('\\');
+                    if (nextSlash > 0)
+                    {
+                        system = afterRoms.Substring(0, nextSlash);
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(system))
+            {
+                _logger.LogWarning($"Could not extract system from romPath: {romPath}");
+                system = _lastSelectedSystem ?? "unknown";
+            }
+
+            _currentGameSystem = system;
+            // EN: IMPORTANT: Use romFileName (full name with region) for video offsets, not gameName (ES display name)
+            // FR: IMPORTANT: Utiliser romFileName (nom complet avec région) pour offsets vidéo, pas gameName (nom affichage ES)
+            // romFileName = "After Burner Complete (Europe)" - matches video/image files
+            // gameName = "After Burner Complete" - ES display name, might be truncated
+            _currentGameName = romFileName; // Use full ROM name for consistency with file names
+            _currentGameRom = romPath;
+            _lastSelectedSystem = system;
+            _gameRunning = true;
+            
+            _logger.LogInformation($"Game Started: system={system}, game={romFileName}.");
+
+            // CHECK PINBALL / CUSTOM COMMANDS
+            // If handled, we skip standard DMD loading screen logic
+            var (pinballHandled, suspendMPV) = await _dmdService.CheckAndRunPinballAsync(system, gameName);
+
+            // EN: Suspend MPV if requested by pinball config
+            // FR: Suspendre MPV si demandé par la config pinball
+            if (suspendMPV)
+            {
+                _logger.LogInformation($"[Pinball] Suspending MPV for '{system}'.");
+                _processService.KillProcess("mpv");
+                _mpvSuspendedForPinball = true;
+            }
+
+            // CHECK DMD LOADING SCREEN (Only if not handled by Pinball logic)
+            // Parallel Execution: Find Media First
+            string? dmdStartMedia = null;
+            if (!pinballHandled)
+            {
+                 dmdStartMedia = _marqueeFinder.FindDmdGameStartMedia(system, romFileName, gameName);
+            }
+
+            var topperMedia = _marqueeFinder.FindGameStartMedia(system, romFileName, gameName);
+            string? marqueeFile = null;
+            string? systemMarquee = null;
+
+            if (topperMedia == null)
+            {
+                // EN: Before finding marquee, check if we need to regenerate video due to saved offsets
+                // FR: Avant de trouver la marquee, vérifier si on doit régénérer la vidéo à cause d'offsets sauvegardés
+                CheckAndTriggerVideoRegeneration(system, gameName);
+                
+                marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("game-start", system, gameName, gameName, romPath);
+                if (marqueeFile == null)
+                {
+                    systemMarquee = await _marqueeFinder.FindMarqueeFileAsync("system-selected", system, "", "", "");
+                }
+            }
+
+            // Execute in Parallel
+            var tasks = new List<Task>();
+
+            if (!string.IsNullOrEmpty(dmdStartMedia))
+            {
+                 _logger.LogInformation($"[Workflow] Playing DMD Start Media: {dmdStartMedia}");
+                 await _dmdService.PlayAsync(dmdStartMedia, _currentGameSystem, _currentGameName);
+            }
+            else if (!pinballHandled) // EN: Only show DMD logo if pinball isn't handling externally / FR: Afficher le logo DMD seulement si le pinball ne gère pas en externe
+            {
+                // Fallback: If no specific "Loading..." media is defined, play the Game's DMD (Logo)
+                // This ensures the DMD isn't blank during loading
+                var defaultGameDmd = await _marqueeFinder.FindDmdImageAsync(system, gameName, romFileName, romPath);
+                if (defaultGameDmd != null)
+                {
+                    _logger.LogInformation($"Playing Game DMD as Loading Fallback: {defaultGameDmd}");
+                    tasks.Add(_dmdService.PlayAsync(defaultGameDmd, system, gameName));
+                }
+                else
+                {
+                    // EN: Fallback to System DMD if Game DMD is not found (Fix for stale media on game-start)
+                    // FR: Fallback vers DMD Système si DMD Jeu non trouvé (Correction média obsolète au lancement)
+                    var systemDmd = await _marqueeFinder.FindDmdImageAsync(system, system, "");
+                    if (systemDmd != null)
+                    {
+                        _logger.LogInformation($"Playing System DMD as Loading Fallback (Game DMD missing): {systemDmd}");
+                        tasks.Add(_dmdService.PlayAsync(systemDmd, system, system));
+                    }
+                    else
+                    {
+                        // Final Fallback
+                        tasks.Add(_dmdService.PlayAsync(_config.DefaultDmdPath));
+                    }
+                }
+            }
+
+            if (topperMedia != null && !suspendMPV)
+            {
+                var ext = Path.GetExtension(topperMedia).ToLowerInvariant();
+                bool shouldLoop = new[] { ".gif", ".mp4", ".avi", ".mkv", ".webm", ".mov" }.Contains(ext);
+                
+                tasks.Add(_mpv.DisplayImage(topperMedia, shouldLoop).ContinueWith(t => 
+                    _logger.LogInformation($"Displayed game-start topper: {topperMedia} (loop={shouldLoop})")));
+            }
+            else if (marqueeFile != null && !suspendMPV)
+            {
+                tasks.Add(_mpv.DisplayImage(marqueeFile).ContinueWith(t => 
+                    _logger.LogInformation($"Displayed game marquee: {marqueeFile}")));
+            }
+            else if (systemMarquee != null && !suspendMPV)
+            {
+                 tasks.Add(_mpv.DisplayImage(systemMarquee).ContinueWith(t => 
+                    _logger.LogInformation($"Displayed system marquee: {systemMarquee}")));
+            }
+            else if (!suspendMPV)
+            {
+                _logger.LogWarning($"No game marquee found for {gameName}, using default (System Fallback failed)");
+            }
+
+            await Task.WhenAll(tasks);
+            
+            // EN: Track video path for adjustment mode (if it's a generated video)
+            // FR: Tracker le chemin vidéo pour mode ajustement (si c'est une vidéo générée)
+            if (topperMedia != null)
+            {
+                _currentVideoPath = topperMedia;
+            }
+            else if (marqueeFile != null)
+            {
+                _currentVideoPath = marqueeFile;
+            }
+            else
+            {
+                _currentVideoPath = null;
+            }
+        }
+
+
+        private async Task HandleGameSelected(string system, string gameName, string romPath)
+        {
+            if (_gameRunning)
+            {
+                _logger.LogWarning($"Ignoring game-selected event for '{gameName}' (Game is running).");
+                return;
+            }
+            
+            if (DateTime.Now < _ignoreEventsUntil)
+            {
+                _logger.LogWarning($"Ignoring game-selected event for '{gameName}' (Post-game cooldown).");
+                return;
+            }
+
+            // EN: Pre-emptively reset RA state when browsing new games
+            // FR: Réinitialiser préventivement l'état RA lors de la navigation dans de nouveaux jeux
+            _raService?.ResetState();
+
+            var romFileName = !string.IsNullOrEmpty(romPath) ? Path.GetFileNameWithoutExtension(romPath) : "";
+            
+            // EN: IMPORTANT: Extract real system from ROM path (not ES alias) for consistency
+            // FR: IMPORTANT: Extraire vrai système depuis chemin ROM (pas alias ES) pour cohérence
+            // ES sends "gw" but ROM path contains "gameandwatch" - we need the real folder name
+            string? realSystem = null;
+            if (!string.IsNullOrEmpty(romPath))
+            {
+                var romsIndex = romPath.IndexOf("\\roms\\", StringComparison.OrdinalIgnoreCase);
+                if (romsIndex < 0) romsIndex = romPath.IndexOf("/roms/", StringComparison.OrdinalIgnoreCase);
+                
+                if (romsIndex >= 0)
+                {
+                    var afterRoms = romPath.Substring(romsIndex + 6);
+                    var nextSlash = afterRoms.IndexOfAny(new[] { '\\', '/' });
+                    if (nextSlash > 0)
+                    {
+                        realSystem = afterRoms.Substring(0, nextSlash);
+                    }
+                }
+            }
+            
+            if (string.IsNullOrEmpty(realSystem))
+            {
+                _logger.LogWarning($"Could not extract real system from romPath: {romPath}, using ES system: {system}");
+                realSystem = system;
+            }
+            
+            _logger.LogInformation($"[Event] Game Selected: {romFileName} ({realSystem})");
+
+            _currentGameSystem = realSystem;
+            // EN: IMPORTANT: Use ROM filename (full name) for consistency with game-start
+            // FR: IMPORTANT: Utiliser nom fichier ROM (nom complet) pour cohérence avec game-start
+            _currentGameName = romFileName;
+            _currentGameRom = romPath;
+
+            // EN: Check if we need to regenerate video due to saved offsets
+            // FR: Vérifier si on doit régénérer la vidéo à cause d'offsets sauvegardés
+            CheckAndTriggerVideoRegeneration(realSystem, romFileName);
+
+            // DMD Logic
+            var dmdFile = await _marqueeFinder.FindDmdImageAsync(system, gameName, romFileName, romPath, allowVideo: false); // EN: No video on game-selected / FR: Pas de vidéo sur game-selected
+            var marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("game-selected", system, gameName, gameName, romPath);
+
+            var tasks = new List<Task>();
+
+            // Play DMD media if available
+            if (!string.IsNullOrEmpty(dmdFile))
+            {
+                await _dmdService.PlayAsync(dmdFile, system, gameName);
+            }
+            else
+            {
+                _logger.LogWarning($"DMD Game Lookup Failed for '{gameName}' ({romFileName}). Attempting Fallback to System DMD...");
+                // Fallback to System DMD or Stop?
+                var systemDmd = await _marqueeFinder.FindDmdImageAsync(system, system, "");
+                if (systemDmd != null) 
+                {
+                    tasks.Add(_dmdService.PlayAsync(systemDmd, system, system));
+                }
+                else 
+                {
+                    // EN: Load default DMD media instead of closing
+                    // FR: Charger le média DMD par défaut au lieu de fermer
+                    _logger.LogWarning($"DMD System Fallback Failed for '{system}'. Loading default DMD media.");
+                    tasks.Add(_dmdService.PlayAsync(_config.DefaultDmdPath));
+                }
+            }
+            
+            if (marqueeFile != null)
+            {
+                tasks.Add(_mpv.DisplayImage(marqueeFile).ContinueWith(t => _logger.LogInformation($"Displayed: {marqueeFile}")));
+            }
+            else
+            {
+                _logger.LogWarning($"No marquee found for {gameName}, using default");
+                tasks.Add(_mpv.DisplayImage(_config.DefaultImagePath, loop: true));
+            }
+            
+            await Task.WhenAll(tasks);
+        }
+
+        // ===================== RETROACHIEVEMENTS EVENT HANDLERS =====================
+        
+        /// <summary>
+        /// EN: Handle achievement unlocked event - Display badge on MPV and DMD
+        /// FR: Gérer événement succès débloqué - Afficher badge sur MPV et DMD
+        /// </summary>
+        private async void OnAchievementUnlocked(object? sender, AchievementUnlockedEventArgs e)
+        {
+            try
+            {
+                _logger.LogInformation($"[RA Workflow] Achievement Unlocked: {e.Achievement.Title} ({e.Achievement.Points} pts)");
+                
+                // EN: Badge path is already local (downloaded by API client)
+                // FR: Chemin du badge est déjà local (téléchargé par client API)
+                var badgePath = e.Achievement.BadgeName;
+                
+                if (string.IsNullOrEmpty(badgePath) || !File.Exists(badgePath))
+                {
+                    _logger.LogWarning($"[RA Workflow] Badge not found: {badgePath}");
+                    return;
+                }
+                
+                // Cup Path logic
+                var cupPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "biggoldencup.png");
+                
+                // EN: Generate MPV Overlay (Badge + Title + Desc + Points) with score
+                // FR: Générer l'overlay MPV (Badge + Titre + Desc + Points) avec score
+                var mpvAchOverlay = _imageService.GenerateMpvAchievementOverlay(badgePath, e.Achievement.Title, e.Achievement.Description, e.Achievement.Points);
+                if (string.IsNullOrEmpty(mpvAchOverlay)) mpvAchOverlay = badgePath; // Fallback
+                
+                // EN: Compose achievement overlay with score for continuity / FR: Composer overlay achievement avec score pour continuité
+                int current = _raService?.CurrentGameUserPoints ?? 0;
+                int total = _raService?.CurrentGameTotalPoints ?? 0;
+                var scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false);
+                var mpvOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, null, 1920, 360);
+                if (string.IsNullOrEmpty(mpvOverlay)) mpvOverlay = mpvAchOverlay; // Fallback
+
+                // EN: Process Badge and Cup for DMD (Resize/Convert with Ratio)
+                // FR: Traiter le badge et la coupe pour DMD (Redimensionner/Convertir avec Ratio)
+                var dmdBadge = _imageService.ProcessDmdImage(badgePath, "achievements", "badges");
+                var dmdCup = _imageService.ProcessDmdImage(cupPath, "achievements", "cup"); // Process cup to fix aspect ratio
+
+                // Execute Notifications in Parallel
+                var mpvTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        // EN: Stop MPV cycle before notification to avoid showing old overlays
+                        // FR: Arrêter cycle MPV avant notification pour éviter afficher anciens overlays
+                        _mpvBadgeCycleCts?.Cancel();
+                        await Task.Delay(100); // Allow cycle to stop
+                        
+                        // EN: Include count in MPV achievement notification if enabled
+                        // FR: Inclure le compteur dans la notification d'achievement MPV si activé
+                        var overlayConfig = _config.MarqueeRetroAchievementsOverlays;
+                        string? countOverlay = null;
+                        if (!string.IsNullOrEmpty(overlayConfig) && overlayConfig.Contains("count", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var achievements = _raService?.CurrentGameAchievements;
+                            if (achievements != null)
+                            {
+                                int unlockedCount = achievements.Values.Count(a => a.Unlocked);
+                                countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false);
+                            }
+                        }
+
+                        // EN: Re-compose mpvOverlay to include count if available
+                        // FR: Re-composer mpvOverlay pour inclure le compteur si disponible
+                        if (!string.IsNullOrEmpty(countOverlay))
+                        {
+                            var mpvWithCount = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, countOverlay, 1920, 360);
+                            if (!string.IsNullOrEmpty(mpvWithCount)) mpvOverlay = mpvWithCount;
+                        }
+
+                        // MPV Notification (cup + achievement with score/count)
+                        await _mpv.ShowAchievementNotification(cupPath, mpvOverlay, 2000, 8000);
+                        
+                        // EN: Refresh overlays with updated scores / FR: Rafraîchir overlays avec scores mis à jour
+                        if (!string.IsNullOrEmpty(overlayConfig))
+                        {
+                            var activeOverlays = overlayConfig.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                                                         .Select(o => o.Trim());
+                            
+                            // EN: Get updated scores / FR: Obtenir scores mis à jour
+                            int current = _raService?.CurrentGameUserPoints ?? 0;
+                            int total = _raService?.CurrentGameTotalPoints ?? 0;
+                            
+                            // EN: Restart MPV badge cycle with updated achievements and scores
+                            // FR: Redémarrer cycle badges MPV avec achievements et scores mis à jour
+                            if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
+                            {
+                                var achievements = _raService?.CurrentGameAchievements;
+                                var gameId = _raService?.CurrentGameId;
+                                if (achievements != null && gameId != null && gameId > 0 && _raService != null)
+                                {
+                                    try
+                                    {
+                                        // EN: Restart cycle with updated data / FR: Redémarrer cycle avec données mises à jour
+                                        StartMpvBadgeRibbonCycle(gameId.Value, achievements, current, total);
+                                        _logger.LogInformation($"[RA Workflow] Restarted MPV Badge Ribbon Cycle with updated scores ({current}/{total})");
+                                    }
+                                    catch (Exception ribbonEx)
+                                    {
+                                        _logger.LogError($"[RA Workflow] Error restarting MPV badge ribbon cycle: {ribbonEx.Message}");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // EN: If badges are disabled, but score or count are enabled, refresh them
+                                // FR: Si les badges sont désactivés, mais que le score ou le compteur sont activés, les rafraîchir
+                                await RefreshPersistentMpvOverlays();
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"[RA Workflow] MPV Notification Error: {ex.Message}");
+                    }
+                });
+
+                var dmdTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        // DMD Notification (Cup -> Scroll Text -> Badge)
+                        // Use processed dmdCup path
+                        await _dmdService.PlayAchievementSequenceAsync(dmdCup ?? cupPath, dmdBadge ?? string.Empty, e.Achievement.Title, 10000);
+                        
+                        // EN: Show Score Overlay if enabled (Post-Achievement)
+                        // FR: Afficher l'overlay de score si activé (Post-Succès)
+                        var overlays = _config.MarqueeRetroAchievementsOverlays;
+                        if (!string.IsNullOrEmpty(overlays))
+                        {
+                            var activeOverlays = overlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                                                         .Select(o => o.Trim());
+                            
+                            // EN: Show Count before Score if enabled / FR: Afficher compteur avant score si activé
+                            if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+                            {
+                                var achievements = _raService?.CurrentGameAchievements;
+                                if (achievements != null)
+                                {
+                                    int unlockedCount = achievements.Values.Count(a => a.Unlocked);
+                                    var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: true);
+                                    if (File.Exists(dmdCount))
+                                    {
+                                        await _dmdService.SetOverlayAsync(dmdCount, 5000); // Show for 5s
+                                        _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay (Post-Achievement): {dmdCount}");
+                                        await Task.Delay(5000); // Wait for count to finish
+                                    }
+                                }
+                            }
+                            
+                            if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+                            {
+                                int current = _raService?.CurrentGameUserPoints ?? 0;
+                                int total = _raService?.CurrentGameTotalPoints ?? 0;
+                                var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true);
+                                if (File.Exists(dmdScore))
+                                {
+                                    await _dmdService.SetOverlayAsync(dmdScore, 5000); // Show for 5s then clear
+                                    _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay (Post-Achievement): {dmdScore}");
+                                }
+                            }
+                            
+                            // EN: Refresh Badge Ribbon / FR: Rafraîchir bandeau de badges
+                            if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
+                            {
+                                var achievements = _raService?.CurrentGameAchievements;
+                                var gameId = _raService?.CurrentGameId;
+                                if (achievements != null && gameId != null && gameId > 0 && _raService != null)
+                                {
+                                    try
+                                    {
+                                        // Wait for score overlay to finish (5s)
+                                        await Task.Delay(5000);
+                                        
+                                        // EN: Restart DMD badge cycle with updated achievements
+                                        // FR: Redémarrer cycle badges DMD avec achievements mis à jour
+                                        StartBadgeRibbonCycle(gameId.Value, achievements);
+                                        _logger.LogInformation($"[RA Workflow] Restarted DMD Badge Ribbon Cycle (Post-Achievement)");
+                                    }
+                                    catch (Exception ribbonEx)
+                                    {
+                                        _logger.LogError($"[RA Workflow] Error restarting DMD badge ribbon cycle: {ribbonEx.Message}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"[RA Workflow] DMD Notification Error: {ex.Message}");
+                    }
+                });
+
+                await Task.WhenAll(mpvTask, dmdTask);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[RA Workflow] Error displaying achievement: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// EN: Handle game started event - Log game info
+        /// FR: Gérer événement jeu démarré - Logger infos jeu
+        /// </summary>
+        private async void OnGameStarted(object? sender, GameStartedEventArgs e)
+        {
+            try
+            {
+                var gameTitle = e.GameInfo?.Title ?? $"Game ID {e.GameId}";
+                var completion = e.UserProgress?.UserCompletion ?? "0%";
+                _logger.LogInformation($"[RA Workflow] Game Started: {gameTitle} - {completion} complete");
+                
+                // EN: Check if Overlays are enabled
+                // FR: Vérifier si les overlays sont activés
+                var overlays = _config.MarqueeRetroAchievementsOverlays;
+                if (!string.IsNullOrEmpty(overlays))
+                {
+                    var activeOverlays = overlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                                                 .Select(o => o.Trim());
+
+                    // EN: Check if game has achievements
+                    // FR: Vérifier si le jeu a des succès
+                    if (e.UserProgress?.Achievements == null || e.UserProgress.Achievements.Count == 0)
+                    {
+                        _logger.LogInformation($"[RA Workflow] Game '{gameTitle}' has no achievements. Skipping Overlays.");
+                        return;
+                    }
+
+                    // EN: Use unified helper for MPV persistent overlays (Score, Count)
+                    // FR: Utiliser le helper unifié pour les overlays persistants MPV (Score, Compteur)
+                    await RefreshPersistentMpvOverlays();
+                    
+                    // EN: DMD - Show count and score if enabled / FR: DMD - Afficher compteur et score si activé
+                    if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase) || activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+                    {
+                        int current = _raService?.CurrentGameUserPoints ?? 0;
+                        int total = _raService?.CurrentGameTotalPoints ?? 0;
+                        var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true);
+
+                        if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+                        {
+                            int unlockedCount = e.UserProgress.Achievements.Values.Count(a => a.Unlocked);
+                            var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, e.UserProgress.Achievements.Count, isDmd: true);
+                            if (File.Exists(dmdCount))
+                            {
+                                await _dmdService.SetOverlayAsync(dmdCount, 5000); // Show for 5s
+                                _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay: {dmdCount}");
+                                await Task.Delay(5000); // Wait before showing score
+                            }
+                        }
+                        
+                        if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase) && File.Exists(dmdScore))
+                        {
+                            // DMD: Show for 5 seconds
+                            await _dmdService.SetOverlayAsync(dmdScore, 5000);
+                            _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay: {dmdScore}");
+                        }
+                    }
+
+                    // EN: Badge Ribbon Overlay / FR: Overlay de bandeau de badges
+                    if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
+                    {
+                        // EN: Check if game has achievements / FR: Vérifier si le jeu a des succès
+                        if (e.UserProgress?.Achievements == null || e.UserProgress.Achievements.Count == 0)
+                        {
+                            _logger.LogInformation($"[RA Workflow] Game '{gameTitle}' has no achievements. Skipping Badge Ribbon.");
+                        }
+                        else if (_raService != null && e.GameId > 0)
+                        {
+                            // Generate badge ribbon overlays
+                            try
+                            {
+                                var mpvBadgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
+                                    e.UserProgress.Achievements, e.GameId, _raService, isDmd: false);
+                                var dmdBadgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
+                                    e.UserProgress.Achievements, e.GameId, _raService!, isDmd: true);
+                                    
+                                if (!string.IsNullOrEmpty(mpvBadgeRibbon) && File.Exists(mpvBadgeRibbon))
+                                {
+                                    // MPV: Start cycling with score composition
+                                    int current = _raService?.CurrentGameUserPoints ?? 0;
+                                    int total = _raService?.CurrentGameTotalPoints ?? 0;
+                                    StartMpvBadgeRibbonCycle(e.GameId, e.UserProgress.Achievements, current, total);
+                                    _logger.LogInformation($"[RA Workflow] Started MPV Badge Ribbon Cycle with Score");
+                                }
+                                
+                                if (!string.IsNullOrEmpty(dmdBadgeRibbon) && File.Exists(dmdBadgeRibbon))
+                                {
+                                    // DMD: Start cycling through badge groups
+                                    StartBadgeRibbonCycle(e.GameId, e.UserProgress.Achievements);
+                                    _logger.LogInformation($"[RA Workflow] Started DMD Badge Ribbon Cycle");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError($"[RA Workflow] Error displaying badge ribbon: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[RA Workflow] Error handling game start: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// EN: Refresh persistent MPV overlays (Score and Count) by composing them into a single image
+        /// FR: Rafraîchir les overlays persistants MPV (Score et Compteur) en les composant en une seule image
+        /// </summary>
+        private async Task RefreshPersistentMpvOverlays()
+        {
+            if (_raService == null || _imageService == null || _mpv == null) return;
+
+            var overlays = _config.MarqueeRetroAchievementsOverlays;
+            if (string.IsNullOrEmpty(overlays)) return;
+
+            var activeOverlays = overlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                                         .Select(o => o.Trim());
+
+            string? scoreOverlay = null;
+            string? countOverlay = null;
+
+            if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+            {
+                int current = _raService.CurrentGameUserPoints;
+                int total = _raService.CurrentGameTotalPoints;
+                scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false);
+            }
+
+            if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+            {
+                var achievements = _raService.CurrentGameAchievements;
+                if (achievements != null)
+                {
+                    int unlockedCount = achievements.Values.Count(a => a.Unlocked);
+                    countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false);
+                }
+            }
+
+            if (scoreOverlay != null || countOverlay != null)
+            {
+                // EN: Compose them into a single overlay (badges Ribbon is handled separately by the cycle)
+                // FR: Les composer en un seul overlay (le bandeau des badges est géré séparément par le cycle)
+                var composed = _imageService.ComposeScoreAndBadges(scoreOverlay, null, countOverlay, 1920, 360);
+                if (!string.IsNullOrEmpty(composed) && File.Exists(composed))
+                {
+                    // EN: Show indefinitely (1h) until next update
+                    await _mpv.ShowOverlay(composed, 3600000, "top-left");
+                    _logger.LogInformation($"[RA Workflow] Refreshed persistent MPV overlays: {Path.GetFileName(composed)}");
+                }
+            }
+        }
+        
+
+        /// <summary>
+        /// EN: Start MPV badge ribbon cycling with score composition (~29 badges per frame)
+        /// FR: Démarrer cycle badges MPV avec composition score (~29 badges par frame)
+        /// </summary>
+        private void StartMpvBadgeRibbonCycle(int gameId, Dictionary<string, Achievement> achievements, int currentPoints, int totalPoints)
+        {
+            _mpvBadgeCycleCts?.Cancel();
+            _mpvBadgeCycleCts?.Dispose();
+            _mpvBadgeCycleCts = new CancellationTokenSource();
+            
+            var token = _mpvBadgeCycleCts.Token;
+            
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // EN: Calculate max badges per frame (1920px / 65px per badge+spacing)
+                    // FR: Calculer badges max par frame (1920px / 65px par badge+espacement)
+                    const int maxBadgesPerFrame = 29;
+                    
+                    // EN: Group achievements by ~29 / FR: Grouper achievements par ~29
+                    var sortedAchievements = achievements.Values.OrderBy(a => a.DisplayOrder).ToList();
+                    var groups = sortedAchievements
+                        .Select((a, i) => new { Achievement = a, Index = i })
+                        .GroupBy(x => x.Index / maxBadgesPerFrame)
+                        .Select(g => g.Select(x => x.Achievement).ToList())
+                        .ToList();
+                    
+                    _logger.LogInformation($"[RA MPV Cycle] Created {groups.Count} groups of ~{maxBadgesPerFrame} badges");
+                    
+                    // EN: Generate count overlay if enabled / FR: Générer overlay compteur si activé
+                    string? countOverlay = null;
+                    var overlayConfig = _config.MarqueeRetroAchievementsOverlays;
+                    if (!string.IsNullOrEmpty(overlayConfig) && overlayConfig.Contains("count", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int unlockedCount = achievements.Values.Count(a => a.Unlocked);
+                        countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false);
+                    }
+                    
+                    // EN: Pre-generate all composed overlays once to avoid file accumulation
+                    // FR: Pré-générer tous les overlays composés une fois pour éviter accumulation de fichiers
+                    var composedOverlays = new List<string>();
+                    
+                    foreach (var group in groups)
+                    {
+                        var groupDict = group.ToDictionary(a => a.ID.ToString(), a => a);
+                        var badgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
+                            groupDict, gameId, _raService!, isDmd: false);
+                        
+                        string? scoreOverlay = null;
+                        if (overlayConfig.Contains("score", StringComparison.OrdinalIgnoreCase))
+                        {
+                            scoreOverlay = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false);
+                        }
+                        
+                        var composedOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, badgeRibbon, countOverlay, 1920, 360);
+                        
+                        if (!string.IsNullOrEmpty(composedOverlay))
+                        {
+                            composedOverlays.Add(composedOverlay);
+                        }
+                    }
+                    
+                    // EN: Generate specific overlay for pause / FR: Générer overlay spécifique pour pause
+                    string? scoreOnly = null;
+                    if (overlayConfig.Contains("score", StringComparison.OrdinalIgnoreCase))
+                    {
+                        scoreOnly = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false);
+                    }
+                    
+                    var composedScoreOnly = _imageService.ComposeScoreAndBadges(scoreOnly, null, countOverlay, 1920, 360);
+                    
+                    _logger.LogInformation($"[RA MPV Cycle] Pre-generated {composedOverlays.Count} composed overlays");
+                    
+                    while (!token.IsCancellationRequested)
+                    {
+                        // EN: Cycle through pre-generated overlays / FR: Cycler à travers overlays pré-générés
+                        foreach (var overlay in composedOverlays)
+                        {
+                            if (token.IsCancellationRequested) break;
+                            
+                            if (File.Exists(overlay))
+                            {
+                                await _mpv.ShowOverlay(overlay, 5000, "top-left");
+                                _logger.LogDebug($"[RA MPV Cycle] Showing overlay: {Path.GetFileName(overlay)}");
+                            }
+                            
+                            await Task.Delay(5000, token);
+                        }
+                        
+                        // EN: During pause, show score-only / FR: Pendant la pause, afficher score seul
+                        if (!string.IsNullOrEmpty(composedScoreOnly) && File.Exists(composedScoreOnly))
+                        {
+                            await _mpv.ShowOverlay(composedScoreOnly, 2000, "top-left");
+                        }
+                        
+                        await Task.Delay(2000, token);
+                    }
+                    
+                    // EN: Cleanup composed overlay files / FR: Nettoyer fichiers overlays composés
+                    foreach (var overlay in composedOverlays)
+                    {
+                        try { if (File.Exists(overlay)) File.Delete(overlay); } catch { }
+                    }
+                    if (!string.IsNullOrEmpty(composedScoreOnly) && File.Exists(composedScoreOnly))
+                    {
+                        try { File.Delete(composedScoreOnly); } catch { }
+                    }
+                    _logger.LogInformation("[RA MPV Cycle] Cleaned up composed overlay files");
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogInformation("[RA MPV Cycle] Cycle stopped");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[RA MPV Cycle] Error: {ex.Message}");
+                }
+            }, token);
+        }
+        
+        /// <summary>
+        /// EN: Start DMD badge ribbon cycling (4x4 groups, 5s each, 10s pause)
+        /// FR: Démarrer cycle badges DMD (groupes 4x4, 5s chacun, pause 10s)
+        /// </summary>
+        private void StartBadgeRibbonCycle(int gameId, Dictionary<string, Achievement> achievements)
+        {
+            _badgeCycleCts?.Cancel();
+            _badgeCycleCts?.Dispose();
+            _badgeCycleCts = new CancellationTokenSource();
+            
+            var token = _badgeCycleCts.Token;
+            
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // EN: Delay 7s to show score first / FR: Délai 7s pour afficher score d'abord
+                    _logger.LogInformation("[RA Badge Cycle] Waiting 7s for score overlay visibility");
+                    await Task.Delay(7000, token);
+                    
+                    // EN: Group achievements by 4 / FR: Grouper achievements par 4
+                    var sortedAchievements = achievements.Values.OrderBy(a => a.DisplayOrder).ToList();
+                    var groups = sortedAchievements
+                        .Select((a, i) => new { Achievement = a, Index = i })
+                        .GroupBy(x => x.Index / 4)
+                        .Select(g => g.Select(x => x.Achievement).ToList())
+                        .ToList();
+                    
+                    _logger.LogInformation($"[RA Badge Cycle] Created {groups.Count} groups of ~4 badges");
+                    
+                    while (!token.IsCancellationRequested)
+                    {
+                        foreach (var group in groups)
+                        {
+                            if (token.IsCancellationRequested) break;
+                            
+                            // EN: Generate ribbon for this group / FR: Générer bandeau pour ce groupe
+                            var groupDict = group.ToDictionary(a => a.ID.ToString(), a => a);
+                            var ribbonPath = await _imageService.GenerateBadgeRibbonOverlay(
+                                groupDict, gameId, _raService!, isDmd: true);
+                            
+                            if (!string.IsNullOrEmpty(ribbonPath) && File.Exists(ribbonPath))
+                            {
+                                await _dmdService.SetOverlayAsync(ribbonPath, 5000);
+                                _logger.LogDebug($"[RA Badge Cycle] Showing group with {group.Count} badges");
+                            }
+                            
+                            await Task.Delay(5000, token);
+                        }
+                        
+                        // EN: Pause 10s with no overlay / FR: Pause 10s sans overlay
+                        _logger.LogDebug("[RA Badge Cycle] Pause 10s");
+                        _dmdService.ClearOverlay();
+                        await Task.Delay(10000, token);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogInformation("[RA Badge Cycle] Cycle stopped");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[RA Badge Cycle] Error: {ex.Message}");
+                }
+            }, token);
+        }
+
+        public void Dispose()
+        {
+            if (_inputService != null)
+            {
+                _inputService.OnMoveCommand -= HandleMoveCommand;
+            }
+            _badgeCycleCts?.Cancel();
+            _badgeCycleCts?.Dispose();
+            _mpvBadgeCycleCts?.Cancel();
+            _mpvBadgeCycleCts?.Dispose();
+            _watcher?.Dispose();
+            _dmdService.Stop();
+        }
+    }
+}

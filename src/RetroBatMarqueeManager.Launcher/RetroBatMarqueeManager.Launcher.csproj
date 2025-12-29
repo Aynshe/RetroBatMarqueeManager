@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>RetroBatMarqueeManager</AssemblyName>
+    <ApplicationIcon>..\RetroBatMarqueeManager\Resources\icon.ico</ApplicationIcon>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\Install_DotNet9.html" Link="Install_DotNet9.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

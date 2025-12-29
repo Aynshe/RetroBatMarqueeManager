@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Action Requise : .NET 9 Runtime</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #9b51e0;
+            /* Violet moderne */
+            --primary-hover: #b07af5;
+            --bg-dark: #0f0c29;
+            --bg-gradient: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --text-main: #ffffff;
+            --text-muted: #a0a0a0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-main);
+            height: 100vh;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .container {
+            text-align: center;
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            padding: 3rem;
+            border-radius: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+            max-width: 500px;
+            width: 90%;
+            position: relative;
+            animation: fadeIn 1s ease-out;
+        }
+
+        .icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(45deg, #ff416c, #ff4b2b);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        h1 {
+            font-weight: 700;
+            margin-bottom: 1rem;
+            font-size: 2rem;
+            letter-spacing: -0.5px;
+        }
+
+        p {
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin-bottom: 2rem;
+            font-size: 1.1rem;
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(155, 81, 224, 0.2);
+            color: #d4a5ff;
+            padding: 0.25rem 0.75rem;
+            border-radius: 50px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin-bottom: 1.5rem;
+            border: 1px solid rgba(155, 81, 224, 0.3);
+        }
+
+        .btn {
+            display: inline-block;
+            background: var(--primary);
+            color: white;
+            padding: 1rem 2rem;
+            border-radius: 12px;
+            text-decoration: none;
+            font-weight: 700;
+            transition: all 0.3s ease;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(155, 81, 224, 0.4);
+        }
+
+        .btn:hover {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(155, 81, 224, 0.6);
+        }
+
+        .footer {
+            margin-top: 2rem;
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.3);
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(0px);
+            }
+
+            50% {
+                transform: translateY(-10px);
+            }
+
+            100% {
+                transform: translateY(0px);
+            }
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="icon">⚠️</div>
+
+        <!-- English Content (Default) -->
+        <div id="content-en" style="display:none">
+            <div class="badge">Missing Component</div>
+            <h1>Action Required</h1>
+            <p>
+                <strong>RetroBat Marquee Manager</strong> requires the latest version of <strong>.NET 9.0 Desktop
+                    Runtime</strong> to run.
+                <br><br>
+                Without it, the application cannot start (it runs silently in the background).
+            </p>
+            <a href="https://dotnet.microsoft.com/en-us/download/dotnet/9.0" target="_blank" class="btn">
+                Download .NET 9.0 ➜
+            </a>
+            <div class="footer">
+                Please install the "<strong>Desktop Runtime</strong>" (x64) version for Windows.
+            </div>
+        </div>
+
+        <!-- French Content -->
+        <div id="content-fr" style="display:none">
+            <div class="badge">Composant Manquant</div>
+            <h1>Action Requise</h1>
+            <p>
+                <strong>RetroBat Marquee Manager</strong> a besoin de la dernière version de <strong>.NET 9.0 Desktop
+                    Runtime</strong> pour fonctionner.
+                <br><br>
+                Sans cela, l'application ne pourra pas démarrer (elle tourne silencieusement en arrière-plan).
+            </p>
+            <a href="https://dotnet.microsoft.com/en-us/download/dotnet/9.0" target="_blank" class="btn">
+                Télécharger .NET 9.0 ➜
+            </a>
+            <div class="footer">
+                Veuillez installer la version "<strong>Desktop Runtime</strong>" (x64) pour Windows.
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Auto-detect language
+        (function () {
+            var lang = navigator.language || navigator.userLanguage;
+            if (lang && lang.toLowerCase().indexOf('fr') === 0) {
+                document.getElementById('content-fr').style.display = 'block';
+            } else {
+                document.getElementById('content-en').style.display = 'block';
+            }
+        })();
+    </script>
+</body>
+
+</html>
