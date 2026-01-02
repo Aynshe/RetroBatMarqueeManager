@@ -307,15 +307,14 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
             });
             await SendCommandAsync(loadCmd);
             
-            // 3. Small delay to let MPV start loading
-            await Task.Delay(50);
+            // 3. Small delay to let MPV start loading - REMOVED for speed
+            // await Task.Delay(50);
             
             // 4. Force unpause
             var unpauseCmd = System.Text.Json.JsonSerializer.Serialize(new 
             { 
                 command = new[] { "set_property", "pause", "no" } 
             });
-            await SendCommandAsync(unpauseCmd);
             await SendCommandAsync(unpauseCmd);
         }
 
@@ -444,62 +443,70 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
 
         private CancellationTokenSource? _overlayCts;
 
-        public async Task ShowOverlay(string imagePath, int durationMs = 5000, string position = "top-right")
+        private int _currentOverlaySlot = 0; // 0 for none, 1 for slot 1, 2 for slot 2
+
+        public async Task ShowOverlay(string imagePath, int durationMs, string position = "top-right")
         {
             if (!_config.IsMpvEnabled) return;
 
             try
             {
-                // EN: Cancel previous overlay timer if any (prevents race conditions)
-                // FR: Annuler timer overlay précédent s'il existe (évite conditions de course)
+                // EN: Cancel previous overlay timer (do not dispose, just cancel)
+                // FR: Annuler timer précédent
                 _overlayCts?.Cancel();
-                _overlayCts?.Dispose();
                 _overlayCts = new CancellationTokenSource();
 
-                // EN: Use lavfi overlay filter to show image on top of current video
-                // FR: Utiliser filtre lavfi overlay pour afficher image sur vidéo courante
-                // Syntax: vf add @name:lavfi=[movie='path'[logo];[in][logo]overlay=X:Y[out]]
+                // EN: Ping-Pong Logic: Use alternate slot to prevent frame gap (which causes scaling jump)
+                // FR: Logique Ping-Pong: Utiliser slot alterné pour éviter saut de frame (et saut de scaling)
+                // If Slot 1 is active, use Slot 2, then remove Slot 1. And vice-versa.
+                int nextSlot = (_currentOverlaySlot == 1) ? 2 : 1;
+                string currentLabel = $"@ra_overlay_{_currentOverlaySlot}";
+                string nextLabel = $"@ra_overlay_{nextSlot}";
                 
-                var safePath = imagePath.Replace("\\", "/"); // Forward slashes are safer
-                // Note: Do NOT escape ':' for mapped drives inside movie='...' as it breaks avformat_open_input
+                var safePath = imagePath.Replace("\\", "/"); 
                 
-                // EN: Calculate position based on parameter
-                // FR: Calculer position selon paramètre
+                // Position logic
                 string overlayPosition;
-                if (position == "bottom-left")
-                {
-                    // Bottom-left with 0px padding
-                    overlayPosition = "0:main_h-overlay_h";
-                }
-                else if (position == "top-left")
-                {
-                    // Top-left at 0,0 (for full-screen composed overlays)
-                    overlayPosition = "0:0";
-                }
-                else
-                {
-                    // Top-right with 20px padding (default for score)
-                    overlayPosition = "main_w-overlay_w-20:20";
-                }
+                if (position == "bottom-left") overlayPosition = "0:main_h-overlay_h";
+                else if (position == "top-left") overlayPosition = "0:0";
+                else overlayPosition = "main_w-overlay_w-20:20";
                 
-                var filterGraph = $"movie=\\'{safePath}\\'[logo];[in][logo]overlay={overlayPosition}[out]";
-                var cmd = $"vf add @ra_overlay:lavfi=[{filterGraph}]";
+                int w = _config.MarqueeWidth;
+                int h = _config.MarqueeHeight;
+                
+                // Filter Graph: Identical logic but with unique label
+                var filterGraph = $"[in]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}:(iw-ow)/2:(ih-oh)/2[bg];movie=\\'{safePath}\\'[logo];[bg][logo]overlay={overlayPosition}[out]";
                 
                 var jsonCmd = System.Text.Json.JsonSerializer.Serialize(new 
                 { 
-                    command = new[] { "vf", "add", $"@ra_overlay:lavfi=[{filterGraph}]" } 
+                    command = new[] { "vf", "add", $"{nextLabel}:lavfi=[{filterGraph}]" } 
                 });
 
-                _logger.LogInformation($"[MPV] Adding Overlay at {position}: {imagePath}");
+                // 1. Add NEW overlay (on top of old one if exists)
                 await SendCommandAsync(jsonCmd);
+                
+                // 2. Remove OLD overlay if it existed (and wasn't 0)
+                if (_currentOverlaySlot != 0)
+                {
+                    var removeCmd = System.Text.Json.JsonSerializer.Serialize(new 
+                    { 
+                        command = new[] { "vf", "remove", currentLabel } 
+                    });
+                    // Fire and forget remove to speed up? No, safe async
+                    await SendCommandAsync(removeCmd);
+                }
+                
+                // Update state
+                _currentOverlaySlot = nextSlot;
+
+                _logger.LogInformation($"[MPV] Swapped to Overlay Slot {nextSlot}: {imagePath}");
 
                 // EN: Auto-remove after duration
-                // FR: Auto-suppression après durée
                 var token = _overlayCts.Token;
                 _ = Task.Delay(durationMs, token).ContinueWith(async t => 
                 {
                     if (t.IsCanceled) return;
-                    await RemoveOverlay(false); // Pass false to avoid cancelling the token that just expired
+                    await RemoveOverlay(false); 
                 }, TaskScheduler.Default);
             }
             catch (Exception ex)
@@ -511,23 +518,24 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
         public async Task ShowAchievementNotification(string cupPath, string finalOverlayPath, int cupDuration = 2000, int finalDuration = 8000)
         {
              // Sequence: Cup -> Final
+             // EN: Use Ping-Pong logic implicitly. Do NOT remove overlays explicitly to avoid scaling jumps.
+             // FR: Utiliser la logique Ping-Pong implicitement. NE PAS supprimer explicitement les overlays pour éviter les sauts de scaling.
              
              // 1. Show Cup
              if (!string.IsNullOrEmpty(cupPath) && File.Exists(cupPath))
              {
-                 await RemoveOverlay(); // Ensure clean state
-                 await Task.Delay(200); // Buffer
-                 await ShowOverlay(cupPath, cupDuration);
+                 // EN: Duration slightly longer than wait time to ensure overlap
+                 await ShowOverlay(cupPath, cupDuration + 500); 
                  await Task.Delay(cupDuration);
              }
              
              // 2. Show Final (Badge + Text)
              if (!string.IsNullOrEmpty(finalOverlayPath) && File.Exists(finalOverlayPath))
              {
-                 await RemoveOverlay(); // Remove cup
-                 await Task.Delay(200); // Buffer
-                 await ShowOverlay(finalOverlayPath, finalDuration);
-                 await Task.Delay(finalDuration); // EN: Wait for display to finish before returning / FR: Attendre la fin de l'affichage avant de retourner
+                 // EN: Use "top-left" (0:0) because the overlay is generated as a full-screen canvas
+                 // EN: Duration slightly longer than wait time to ensure overlap with next cycle start
+                 await ShowOverlay(finalOverlayPath, finalDuration + 2000, "top-left");
+                 await Task.Delay(finalDuration); 
              }
         }
 
@@ -536,18 +544,26 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
              if (!_config.IsMpvEnabled) return;
              try
              {
-                if (cancelTimer)
-                {
-                    _overlayCts?.Cancel();
-                }
+                if (cancelTimer) _overlayCts?.Cancel();
 
-                var jsonCmd = System.Text.Json.JsonSerializer.Serialize(new 
-                { 
-                    command = new[] { "vf", "remove", "@ra_overlay" } 
-                });
-                await SendCommandAsync(jsonCmd);
+                // EN: Remove CURRENT slot
+                if (_currentOverlaySlot != 0)
+                {
+                    var label = $"@ra_overlay_{_currentOverlaySlot}";
+                    var jsonCmd = System.Text.Json.JsonSerializer.Serialize(new 
+                    { 
+                        command = new[] { "vf", "remove", label } 
+                    });
+                    await SendCommandAsync(jsonCmd);
+                    _currentOverlaySlot = 0; // Reset
+                }
+                
+                // Safety: Try removing the other one too just in case state got desync
+                // (Optional, maybe overkill but safe)
+                // await SendCommandAsync(... "remove", "@ra_overlay_1" ... );
+                // await SendCommandAsync(... "remove", "@ra_overlay_2" ... );
              }
-             catch { /* Ignore if already removed */ }
+             catch { }
         }
     }
 }

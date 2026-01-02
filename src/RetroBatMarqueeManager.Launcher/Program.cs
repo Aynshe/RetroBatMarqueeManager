@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace RetroBatMarqueeManager.Launcher
 {
@@ -20,7 +21,60 @@ namespace RetroBatMarqueeManager.Launcher
             }
             catch { /* Ignore logging errors */ }
             
-            // 1. Check for .NET 9 Desktop Runtime
+            // 1. Locate Application
+            var appPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RetroBatMarqueeManager.App.exe");
+            if (!File.Exists(appPath))
+            {
+                LogLauncher($"FATAL ERROR: Application not found at {appPath}");
+                return;
+            }
+            
+            // EN: Handle -menu argument OR First Run (missing config)
+            // FR: Gérer argument -menu OU Premier Lancement (config absente)
+            var configPathCheck = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.ini");
+            bool isFirstRun = !File.Exists(configPathCheck);
+            bool isMenuArg = args.Length > 0 && args[0].Equals("-menu", StringComparison.OrdinalIgnoreCase);
+
+            if (isMenuArg || isFirstRun)
+            {
+                // EN: If First Run, start Watchdog (Service) in parallel to generate config
+                // FR: Si Premier Lancement, lancer Watchdog (Service) en parallèle pour générer config
+                if (isFirstRun)
+                {
+                    Task.Run(() => RunWatchdog(appPath, args));
+                }
+
+                // EN: Prevent multiple instances of config menu
+                // FR: Empêcher les instances multiples du menu de configuration
+                bool createdNew;
+                using (var mutex = new System.Threading.Mutex(true, "RetroBatMarqueeManager_ConfigMenu_Mutex", out createdNew))
+                {
+                    if (!createdNew)
+                    {
+                        // Already running - find and focus
+                        Process current = Process.GetCurrentProcess();
+                        foreach (Process process in Process.GetProcessesByName(current.ProcessName))
+                        {
+                            if (process.Id != current.Id)
+                            {
+                                NativeMethods.ShowWindow(process.MainWindowHandle, NativeMethods.SW_RESTORE);
+                                NativeMethods.SetForegroundWindow(process.MainWindowHandle);
+                                return;
+                            }
+                        }
+                        return;
+                    }
+
+                    var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.ini");
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
+                    // Open with First Run flag if applicable
+                    Application.Run(new Forms.ConfigMenuForm(configPath, isFirstRun));
+                }
+                return; // Exit after closing config form
+            }
+            
+            // 2. Check for .NET 9 Desktop Runtime
             if (!IsNet9DesktopInstalled())
             {
                 // EN: In headless mode (no explorer.exe), MessageBox won't work - log to file instead
@@ -42,14 +96,12 @@ namespace RetroBatMarqueeManager.Launcher
                 return; // Exit Launcher
             }
 
-            // 2. Locate Application
-            var appPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RetroBatMarqueeManager.App.exe");
-            if (!File.Exists(appPath))
-            {
-                LogLauncher($"FATAL ERROR: Application not found at {appPath}");
-                return;
-            }
+            // 3. Normal Startup - Run Watchdog Blocking
+            RunWatchdog(appPath, args);
+        }
 
+        static void RunWatchdog(string appPath, string[] args)
+        {
             // 3. Watchdog Loop - Monitor and Auto-Restart on Crash
             // EN: Intelligent crash monitoring with consecutive crash limit
             // FR: Monitoring intelligent des crashs avec limite de crashs consécutifs
@@ -279,5 +331,15 @@ namespace RetroBatMarqueeManager.Launcher
             // If dotnet command fails, user definitely needs to install checks.
             return false;
         }
+    }
+    internal static class NativeMethods
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        internal const int SW_RESTORE = 9;
     }
 }

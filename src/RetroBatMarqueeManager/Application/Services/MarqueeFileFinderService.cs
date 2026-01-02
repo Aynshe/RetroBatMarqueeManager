@@ -12,7 +12,7 @@ namespace RetroBatMarqueeManager.Application.Services
         private readonly IConfigService _config;
         private readonly IEsSettingsService _esSettings;
         private readonly ImageConversionService _imageService;
-        private readonly ScreenScraperService _screenScraper;
+        private readonly IScraperManager _scraperManager;
         private readonly OffsetStorageService _offsetService;
         private readonly ILogger<MarqueeFileFinderService> _logger;
         
@@ -29,14 +29,14 @@ namespace RetroBatMarqueeManager.Application.Services
             IEsSettingsService esSettings,
             ImageConversionService imageService,
             OffsetStorageService offsetService,
-            ScreenScraperService screenScraper,
+            IScraperManager scraperManager,
             ILogger<MarqueeFileFinderService> logger)
         {
             _config = config;
             _esSettings = esSettings;
             _imageService = imageService;
             _offsetService = offsetService;
-            _screenScraper = screenScraper;
+            _scraperManager = scraperManager;
             _logger = logger;
         }
 
@@ -287,24 +287,76 @@ namespace RetroBatMarqueeManager.Application.Services
             _lastRom = romPath;
             _lastTitle = gameTitle;
 
-            // --- PRIORITY 1: AUTO-SCRAPING (If Enabled) ---
-            if (_config.MarqueeAutoScraping && !string.IsNullOrEmpty(romPath) && !isPreview)
+            // --- PRIORITY 0: CUSTOM PATH (Super Priority) ---
+            // User Request: Custom path is priority on everything (System dependent)
+            if (!string.IsNullOrEmpty(_config.GameCustomMarqueePath))
             {
-                // Try scraping for 'mpv' media type
-                 _logger.LogInformation($"[Scraping Priority] Checking ScreenScraper for {gameName} ({system})...");
-                 var scrapedPath = await _screenScraper.CheckAndScrapeAsync(system, gameName, romPath, "mpv");
+                 // Create temp candidates for search including aliases
+                 foreach (var sysCand in systemCandidates)
+                 {
+                      var sysCustomDir = Path.Combine(_config.GameCustomMarqueePath, sysCand);
+                      if (Directory.Exists(sysCustomDir))
+                      {
+                           // Check RomName, SafeRomName, GameName, SafeGameName
+                           // We use TryFind logic manually here or just reusing TryFind logic is hard because TryFind intermixes default paths?
+                           // Actually TryFind handles Custom Path internally priority 0. 
+                           // So we can just call TryFind for all candidates but strict on Custom?
+                           // No, TryFind will fall through.
+                           
+                           // Let's rely on manual check for speed and correctness here
+                           var customCandidates = new List<string> { romFileName, safeRomName, gameName, safeGameName };
+                           if (!string.IsNullOrEmpty(romFileName)) customCandidates.Add($"{romFileName}-marquee");
+                           if (!string.IsNullOrEmpty(romFileName)) customCandidates.Add($"{romFileName}-marquee_composed");
+
+                           foreach(var cand in customCandidates)
+                           {
+                               if (string.IsNullOrEmpty(cand)) continue;
+                               var customFile = FindFile(Path.Combine(sysCustomDir, cand), subFolder: system);
+                               if (customFile != null)
+                               {
+                                   _logger.LogInformation($"[Priority 0] Found Custom Path media: {customFile}");
+                                   return customFile;
+                               }
+                           }
+                      }
+                 }
+            }
+
+            // --- PRIORITY 1: AUTO-SCRAPING (If Enabled) ---
+            // Fix: Ignorer le scraping si nous sommes en Game-Start (isGameStart=true) OU preview
+            if (_config.MarqueeAutoScraping && !string.IsNullOrEmpty(romPath) && !isPreview && !isGameStart)
+            {
+                 // EN: Determine effective system for scraping (Priority: Real System from Path > Alias > System)
+                 // FR: Déterminer le système effectif pour le scraping (Priorité : Vrai système du chemin > Alias > Système)
+                 var effectiveScrapSystem = system;
+                 if (!string.IsNullOrEmpty(realSystemFromPath))
+                 {
+                     effectiveScrapSystem = realSystemFromPath;
+                 }
+                 else if (_config.SystemAliases.TryGetValue(system, out var scrapAlias))
+                 {
+                     effectiveScrapSystem = scrapAlias;
+                 }
+
+                 // Try scraping for 'mpv' media type
+                 _logger.LogInformation($"[Scraping Priority] Checking configured scrapers for {gameName} ({effectiveScrapSystem})...");
+                 // Pass effectiveScrapSystem instead of system
+                 var scrapedPath = await _scraperManager.CheckAndScrapeAsync(effectiveScrapSystem, gameName, romPath, "mpv");
                  if (scrapedPath != null)
                  {
                      _logger.LogInformation($"[Scraping Priority] Success: {scrapedPath}");
-                     return _imageService.ProcessImage(scrapedPath, subFolder: system);
+                     return _imageService.ProcessImage(scrapedPath, subFolder: system); // Cache still uses original 'system' folder for consistency with ES
                  }
 
                  // EN: If scraping is in progress, return placeholder
                  // FR: Si le scraping est en cours, retourner l'image provisoire
-                 if (_screenScraper.IsScraping(system, gameName, "mpv"))
+                 // Fix: Use romFileName for key matching
+                 // Use effectiveScrapSystem for checking progress too
+                 if (_scraperManager.IsScraping(effectiveScrapSystem, gameName, "mpv"))
                  {
-                     _logger.LogInformation($"[Scraping] {gameName} ({system}) is currently being scraped. Returning placeholder.");
-                     return _imageService.GetScrapingPlaceholder("mpv");
+                     string? scraperName = _scraperManager.GetActiveScraperName(effectiveScrapSystem, gameName, "mpv");
+                     _logger.LogInformation($"[Scraping] {gameName} ({effectiveScrapSystem}) is currently being scraped by {scraperName}. Returning placeholder.");
+                     return _imageService.GetScrapingPlaceholder("mpv", scraperName);
                  }
             }
 
@@ -391,7 +443,10 @@ namespace RetroBatMarqueeManager.Application.Services
 
                     if (logoRaw == _config.DefaultImagePath) logoRaw = "";
 
-                    var generatedVideo = _imageService.GenerateMarqueeVideo(videoSource, logoRaw ?? "", system, safeRomName);
+
+                    _logger.LogWarning($"[DEBUG CHECK] GenerateMarqueeVideo called with gameName='{romFileName}'"); // Previous log
+                    _logger.LogError($"[CRITICAL DEBUG] romFileName: '{romFileName}', safeRomName: '{safeRomName}'"); // New critical log
+                    var generatedVideo = _imageService.GenerateMarqueeVideo(videoSource, logoRaw ?? "", system, romFileName);
                     if (generatedVideo != null)
                     {
                         return generatedVideo;
@@ -1017,7 +1072,7 @@ namespace RetroBatMarqueeManager.Application.Services
             return null;
         }
 
-        public async Task<string?> FindDmdImageAsync(string system, string gameName, string romFileName, string romPath = "", bool allowVideo = true)
+        public async Task<string?> FindDmdImageAsync(string system, string gameName, string romFileName, string romPath = "", bool allowVideo = true, bool allowScraping = true)
         {
             if (!_config.DmdEnabled) return null;
             
@@ -1045,27 +1100,10 @@ namespace RetroBatMarqueeManager.Application.Services
                 systemCandidates.Add(alias);
             }
 
-            // --- PRIORITY 1: AUTO-SCRAPING (If Enabled) ---
-            if (_config.MarqueeAutoScraping && !string.IsNullOrEmpty(romPath))
-            {
-                _logger.LogInformation($"[DMD Scraping Priority] Checking ScreenScraper for {gameName} ({system})...");
-                var scrapedPath = await _screenScraper.CheckAndScrapeAsync(system, gameName, romPath, "dmd");
-                if (scrapedPath != null)
-                {
-                    _logger.LogInformation($"[DMD Scraping Priority] Success: {scrapedPath}");
-                    return _imageService.ProcessDmdImage(scrapedPath, subFolder: system);
-                }
-
-                if (_screenScraper.IsScraping(system, gameName, "dmd"))
-                {
-                    _logger.LogInformation($"[DMD Scraping] {gameName} ({system}) is currently being scraped. Returning placeholder.");
-                    return _imageService.GetScrapingPlaceholder("dmd");
-                }
-            }
-
             var safeRom = Sanitize(romFileName);
             var safeGame = Sanitize(gameName);
 
+            // --- PRIORITY 0: CUSTOM DMD PATH (Super Priority) ---
             // 1. Check Custom DmdMediaPath (Priority)
             if (!string.IsNullOrEmpty(_config.DmdMediaPath) && Directory.Exists(_config.DmdMediaPath))
             {
@@ -1124,6 +1162,25 @@ namespace RetroBatMarqueeManager.Application.Services
                  }
             }
 
+            // --- PRIORITY 1: AUTO-SCRAPING (If Enabled) ---
+            if (_config.MarqueeAutoScraping && !string.IsNullOrEmpty(romPath) && allowScraping)
+            {
+                _logger.LogInformation($"[DMD Scraping Priority] Checking configured scrapers for {gameName} ({system})...");
+                var scrapedPath = await _scraperManager.CheckAndScrapeAsync(system, gameName, romPath, "dmd");
+                if (scrapedPath != null)
+                {
+                    _logger.LogInformation($"[DMD Scraping Priority] Success: {scrapedPath}");
+                    return _imageService.ProcessDmdImage(scrapedPath, subFolder: system);
+                }
+
+                if (_scraperManager.IsScraping(system, gameName, "dmd"))
+                {
+                    string? scraperName = _scraperManager.GetActiveScraperName(system, gameName, "dmd");
+                    _logger.LogInformation($"[DMD Scraping] {gameName} ({system}) is currently being scraped by {scraperName}. Returning placeholder.");
+                    return _imageService.GetScrapingPlaceholder("dmd", scraperName);
+                }
+            }
+
             // --- PRIORITY 2: VIDEO GENERATION (If Enabled) ---
             if (_config.MarqueeVideoGeneration)
             {
@@ -1140,7 +1197,9 @@ namespace RetroBatMarqueeManager.Application.Services
 
                     if (logoRaw == _config.DefaultImagePath) logoRaw = "";
 
-                    var generatedVideo = _imageService.GenerateMarqueeVideo(videoSource, logoRaw ?? "", system, Sanitize(romFileName) ?? Sanitize(gameName));
+
+                    _logger.LogWarning($"[DMD GEN DEBUG] GenerateMarqueeVideo (DMD path) called with gameName='{romFileName}'");
+                    var generatedVideo = _imageService.GenerateMarqueeVideo(videoSource, logoRaw ?? "", system, romFileName);
                     if (generatedVideo != null)
                     {
                         // Fix: If browsing (allowVideo=false), do not use the GENERATED video on DMD either

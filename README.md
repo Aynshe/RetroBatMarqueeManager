@@ -9,6 +9,19 @@ Original Project: [https://github.com/Nelfe80/MarqueeManager](https://github.com
 *   **Smart Composition**: If no specific marquee is found, it automatically composes one using the Game Logo + Fanart Background.
 *   **Media Support**: Supports PNG, JPG, SVG, and MP4/Video animations via MPV.
 *   **Live Real-Time Editor**: Adjust the position of your marquees directly on the screen while the game is running.
+*   **User-Friendly Configuration**: Dedicated UI for easy setup.
+
+## Configuration Menu
+
+You can access the configuration interface in two ways:
+
+1.  **From System Tray**: Right-click the RetroBat Marquee Manager icon in the taskbar and select **Configuration**.
+2.  **Via Command Line**: Launch the application with the `-menu` argument:
+    ```bash
+    RetroBatMarqueeManager.exe -menu
+    ```
+
+> On the first run (if no `config.ini` exists), the configuration menu will open automatically.
 
 ## Live Editor Controls (In-Game)
 
@@ -53,6 +66,10 @@ Edit `config.ini` in the plugin folder to customize behavior.
 *   **Paths & Patterns**:
     *   `MarqueeFilePath`: Pattern to find game images (e.g. `{system_name}\{game_name}`).
     *   `SystemAliases`: Map short system names to folder names (e.g. `gc=gamecube`).
+
+*   **Scraping Settings**:
+    *   `MarqueeAutoScraping`: Enable automatic media scraping. **Priority**: Scraped media takes precedence over default images found in the ROM folder.
+    *   `PrioritySource`: Order of preference for scrapers (e.g. `ScreenScraper, arcadeitalia`).
 
 ## RetroAchievements Integration
 
@@ -133,3 +150,5 @@ This project uses the following open-source tools and APIs:
 *   **dmd-extensions** (DMD Hardware Support by freezy): [https://github.com/freezy/dmd-extensions](https://github.com/freezy/dmd-extensions)
 *   **FFmpeg** (Video Processing): [https://ffmpeg.org](https://ffmpeg.org)
 *   **libzedmd** (Real DMD Support): [https://github.com/PPUC/libzedmd](https://github.com/PPUC/libzedmd)
+*   **ScreenScraper**: [https://www.screenscraper.fr](https://www.screenscraper.fr)
+*   **ArcadeItalia**: [http://adb.arcadeitalia.net](http://adb.arcadeitalia.net)

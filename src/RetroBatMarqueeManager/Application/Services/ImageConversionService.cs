@@ -241,10 +241,31 @@ namespace RetroBatMarqueeManager.Application.Services
 
             if (File.Exists(targetPath))
             {
-                 if (File.GetLastWriteTime(sourcePath) <= File.GetLastWriteTime(targetPath))
+                 // EN: Optimization for System Logos - trust cache if exists (skip timestamp check to avoid latency)
+                 // FR: Optimisation pour logos système - faire confiance au cache s'il existe (sauter vérif date)
+                 // System logos are unlikely to change frequently.
+                 bool isSystemLogo = !isVideo && (subFolder == "systems" || (system != null && subFolder != "overlays" && subFolder != "generated_videos")); 
+
+                 if (isSystemLogo)
                  {
+                      _logger.LogInformation($"[DMD Cache] HIT (System Optimization): Using existing {targetPath} for {sourcePath}");
+                      return targetPath;
+                 }
+
+                 var srcTime = File.GetLastWriteTime(sourcePath);
+                 var tgtTime = File.GetLastWriteTime(targetPath);
+
+                 if (srcTime <= tgtTime)
+                 {
+                     _logger.LogInformation($"[DMD Cache] HIT (Valid): {targetPath} (Src: {srcTime} <= Tgt: {tgtTime})");
                      return targetPath;
                  }
+                 
+                 _logger.LogInformation($"[DMD Cache] MISS (Stale): Source {sourcePath} ({srcTime}) is newer than {targetPath} ({tgtTime}). Re-converting.");
+            }
+            else
+            {
+                 _logger.LogInformation($"[DMD Cache] MISS (New): Generating {targetPath} from {sourcePath}");
             }
 
             if (isVideo)
@@ -398,6 +419,9 @@ namespace RetroBatMarqueeManager.Application.Services
         /// </summary>
         public string? GenerateMarqueeVideo(string sourceVideo, string logoPath, string system, string gameName)
         {
+            _logger.LogWarning($"[DEBUG CHECK] Inside GenerateMarqueeVideo: gameName='{gameName}'");
+
+
             if (string.IsNullOrEmpty(sourceVideo) || !File.Exists(sourceVideo)) return null;
 
             try
@@ -440,8 +464,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 // y = (scaled_h - mh) * 0.5 (Center) -> User wants "character zone". 
                 // Let's use 60% down for slightly lower focus.
                 
-                // Overlay Logo: 80% of Marquee Height
-                int logoH = (int)(mh * 0.8);
+                // (Old logoH calculation removed)
                 
                 // FFmpeg filter complex:
                 // [0:v] : Video input
@@ -459,13 +482,17 @@ namespace RetroBatMarqueeManager.Application.Services
                 {
                     inputs.Add("-i");
                     inputs.Add(logoPath);
-                    // Filter: 
-                    // [0:v] scale=W:H (Increase to cover) -> Crop to W:H (Center-ish) -> Format YUV420P
-                    // [1:v] scale=-1:LogoH (Scale logo)
-                    // [v][logo] overlay=10:10 
+                    
+                    // EN: Adaptive Scaling based on Aspect Ratio
+                    double ar = (double)mw / mh;
+                    double heightFactor = (ar > 2.5) ? 0.8 : 0.4;
+                    int maxW = (int)(mw * 0.90);
+                    int maxH = (int)(mh * heightFactor);
+                    
+                    _logger.LogInformation($"[VideoGen] Adaptive Scaling: AR={ar:F2}, HeightFactor={heightFactor}, MaxBox={maxW}x{maxH}");
                     
                     filter = $"[0:v]scale={mw}:{mh}:force_original_aspect_ratio=increase,crop={mw}:{mh}:(iw-ow)/2:(ih-oh)*0.4,format=yuv420p[base];" +
-                             $"[1:v]scale=-1:{logoH}[logo];" +
+                             $"[1:v]scale={maxW}:{maxH}:force_original_aspect_ratio=decrease[logo];" +
                              $"[base][logo]overlay=10:10,format=yuv420p";
                 }
                 else
@@ -548,6 +575,8 @@ namespace RetroBatMarqueeManager.Application.Services
             int cropX, int cropY, double zoom, int logoX, int logoY, double logoScale, 
             double startTime = 0.0, double endTime = 0.0)
         {
+
+
             if (string.IsNullOrEmpty(sourceVideo) || !File.Exists(sourceVideo)) return null;
 
             try
@@ -842,7 +871,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
                 // Unique filename based on title content to cache it
                 string cleanTitle = string.Join("_", title.Split(Path.GetInvalidFileNameChars()));
-                string targetPath = Path.Combine(cacheDir, $"ach_overlay_{cleanTitle}_{points}.png");
+                string targetPath = Path.Combine(cacheDir, $"ach_overlay_{cleanTitle}_{points}_{w}x{h}.png");
 
                 // Reuse cache? (Maybe not if badge changes? Badge is usually stable per achievement)
                 if (File.Exists(targetPath)) return targetPath;
@@ -859,53 +888,72 @@ namespace RetroBatMarqueeManager.Application.Services
                     //                   [ Desc (Bottom) ]
                     // + Cup icon or points somewhere?
 
-                    // Let's mimic a "Toast" notification style at the bottom or top?
-                    // User said "The badge implies... MPV can display everything at same time."
-                    // Let's create a nice panel.
+                // Aspect Ratio Check
+                // EN: If standard 16:9 (ratio < 3), use "Banner" style (smaller relative size)
+                // FR: Si standard 16:9 (ratio < 3), utiliser style "Bannière" (taille relative plus petite)
+                double aspectRatio = (double)w / (double)h;
+                bool isUltrawide = aspectRatio > 3.0;
 
-                    int margin = 20;
-                    int badgeSize = (int)(h * 0.8); // 80% height
-                    int badgeX = margin;
-                    int badgeY = (h - badgeSize) / 2;
+                // Scaling Factors
+                // EN: Increased to 35% for 1080p per user feedback ("too small/low" at 25%)
+                // FR: Augmenté à 35% pour 1080p selon retour utilisateur ("trop petit/bas" à 25%)
+                float heightScale = isUltrawide ? 0.8f : 0.35f; 
+                float marginScale = isUltrawide ? 18.0f : 50.0f; 
 
-                    // Load Badge
-                    using (var badgeImg = LoadBitmapWithSvgSupport(badgePath))
+                int badgeSize = (int)(h * heightScale); 
+                int margin = Math.Max(10, (int)(h / marginScale));
+                
+                // Vertical Position: Always Center Vertically (Left Center)
+                // EN: User requested "Center screen on the left" for both modes
+                // FR: Utilisateur a demandé "Centre écran sur la gauche" pour les deux modes
+                int badgeY = (h - badgeSize) / 2;
+                int badgeX = margin;
+
+                // Load Badge
+                using (var badgeImg = LoadBitmapWithSvgSupport(badgePath))
+                {
+                    if (badgeImg != null)
                     {
-                        if (badgeImg != null)
-                        {
-                            g.DrawImage(badgeImg, badgeX, badgeY, badgeSize, badgeSize);
-                        }
+                        g.DrawImage(badgeImg, badgeX, badgeY, badgeSize, badgeSize);
                     }
+                }
 
-                    // Text Area
-                    int textX = badgeX + badgeSize + margin;
-                    int textWidth = w - textX - margin;
-                    int textHeight = h - (margin * 2);
+                // Text Area
+                int textX = badgeX + badgeSize + margin;
+                int textWidth = w - textX - margin;
+                
+                // Fonts - Scale relative to Badge Size now (consistent across ARs)
+                // Badge is the anchor. 
+                // Title is ~20% of badge? No, let's stick to height logic but adjusted by banner factor
+                
+                float fontScaleFactor = isUltrawide ? 1.0f : 0.5f; // Increased relative font size for banner mode
+                
+                int titleSize = Math.Max(12, (int)((h / 7.5f) * fontScaleFactor));
+                int descSize = Math.Max(10, (int)((h / 11.25f) * fontScaleFactor));
+                int pointsSize = Math.Max(10, (int)((h / 10.0f) * fontScaleFactor));
 
-                    // Fonts
-                    // Use standard fonts, ideally loaded from resources if available, but system fallback
-                    using (var titleFont = new Font("Segoe UI", 48, FontStyle.Bold, GraphicsUnit.Pixel))
-                    using (var descFont = new Font("Segoe UI", 32, FontStyle.Regular, GraphicsUnit.Pixel))
-                    using (var pointsFont = new Font("Segoe UI", 36, FontStyle.Bold, GraphicsUnit.Pixel))
-                    using (var brushWhite = new SolidBrush(Color.White))
-                    using (var brushGold = new SolidBrush(Color.Gold))
-                    using (var brushGray = new SolidBrush(Color.LightGray))
-                    {
-                        // Draw Title
-                        g.DrawString(title, titleFont, brushGold, new RectangleF(textX, margin + 40, textWidth, 60));
+                using (var titleFont = new Font("Segoe UI", titleSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var descFont = new Font("Segoe UI", descSize, FontStyle.Regular, GraphicsUnit.Pixel))
+                using (var pointsFont = new Font("Segoe UI", pointsSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var brushWhite = new SolidBrush(Color.White))
+                using (var brushGold = new SolidBrush(Color.Gold))
+                using (var brushGray = new SolidBrush(Color.LightGray))
+                {
+                    // Vertical text offsets relative to badgeY
+                    // Title (Nudged down to 10% from top of badge)
+                    g.DrawString(title, titleFont, brushGold, new RectangleF(textX, badgeY + (badgeSize * 0.10f), textWidth, badgeSize * 0.4f));
 
-                        // Draw Description
-                        g.DrawString(description, descFont, brushWhite, new RectangleF(textX, margin + 110, textWidth, 80));
+                    // Description (Nudged to 40%)
+                    g.DrawString(description, descFont, brushWhite, new RectangleF(textX, badgeY + (badgeSize * 0.40f), textWidth, badgeSize * 0.4f));
 
-                        // Draw Points
-                        string pointsText = $"{points} pts";
-                        g.DrawString(pointsText, pointsFont, brushGold, new RectangleF(textX, margin + 200, textWidth, 50));
-                    }
-                    
-                    bitmap.Save(targetPath, ImageFormat.Png);
+                    // Points (Nudged to 75%)
+                    string pointsText = $"{points} pts";
+                    g.DrawString(pointsText, pointsFont, brushGold, new RectangleF(textX, badgeY + (badgeSize * 0.75f), textWidth, badgeSize * 0.3f));
                 }
                 
-                return targetPath;
+                bitmap.Save(targetPath, ImageFormat.Png);
+            }
+            return targetPath;
             }
             catch (Exception ex)
             {
@@ -1363,7 +1411,11 @@ namespace RetroBatMarqueeManager.Application.Services
                 args.Add("-depth"); args.Add("8");
                 args.Add("-colorspace"); args.Add("sRGB");
                 
-                args.Add(targetPath);
+                // Atomic Write: Output to a temporary file first, then move to target
+                // This prevents MPV from reading a partial/corrupt file while ImageMagick is writing.
+                string tempPath = targetPath + ".tmp_" + DateTime.Now.Ticks + ".png";
+
+                args.Add(tempPath);
 
                 _logger.LogInformation($"Generating composition (Fanart Off: {offsetX},{offsetY} Scale: {fanartScale:F2} | Logo Off: {logoOffsetX},{logoOffsetY} Scale: {logoScale:F2}) [Preview:{isPreview}]: {targetPath}");
 
@@ -1384,8 +1436,21 @@ namespace RetroBatMarqueeManager.Application.Services
 
                 process.WaitForExit(15000);
                 
-                if (WaitForFile(targetPath))
+                if (WaitForFile(tempPath))
                 {
+                    // Atomic move: Copy temp to target (overwrite), then delete temp
+                    try
+                    {
+                        File.Copy(tempPath, targetPath, true);
+                        File.Delete(tempPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"Atomic Move Failed: {ex.Message}");
+                        return logoPath;
+                    }
+
+                    // Clean up old permanent files when using preview mode (hotkeys)
                     // Clean up old permanent files when using preview mode (hotkeys)
                     // EN: Remove old composed files to prevent cache pollution
                     // FR: Supprimer les anciens fichiers composés pour éviter la pollution du cache
@@ -1711,9 +1776,19 @@ namespace RetroBatMarqueeManager.Application.Services
             return false;
         }
     }
-        public string GetScrapingPlaceholder(string type)
+        public string GetScrapingPlaceholder(string type, string? scraperName = "ScreenScraper")
         {
             string fileName = type == "dmd" ? "scraping-dmd.png" : "scraping.png";
+            // Important: We don't cache generic file if we want dynamic text. 
+            // BUT, for performance, we might want to cache per scraper?
+            // Or just overwrite? If we overwrite, multiple scrapers running in parallel might cause contention.
+            // For now, let's append scraperName to filename if not ScreenScraper to allow dynamic generation.
+            
+            if (!string.IsNullOrEmpty(scraperName) && scraperName != "ScreenScraper")
+            {
+                fileName = type == "dmd" ? $"scraping-dmd-{scraperName}.png" : $"scraping-{scraperName}.png";
+            }
+
             string placeholderPath = Path.Combine(_config.MarqueeImagePath, fileName);
 
             if (File.Exists(placeholderPath)) return placeholderPath;
@@ -1723,7 +1798,12 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 int w = type == "dmd" ? _config.DmdWidth : _config.MarqueeWidth;
                 int h = type == "dmd" ? _config.DmdHeight : _config.MarqueeHeight;
-                string label = type == "dmd" ? "Scraping..." : "ScreenScraper: Scraping...";
+                
+                string displayLabel = string.IsNullOrEmpty(scraperName) ? "Scraping..." : $"{scraperName}: Scraping...";
+                if (type == "dmd") displayLabel = "Scraping..."; // Keep DMD simple or use short name? 
+                if (type == "dmd" && !string.IsNullOrEmpty(scraperName)) displayLabel = scraperName; // Just name on DMD?
+                
+                string label = displayLabel;
                 
                 var startInfo = new ProcessStartInfo
                 {
@@ -1759,8 +1839,8 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
                 else
                 {
-                    if (!int.TryParse(_config.GetSetting("MarqueeWidth", "1920"), out canvasWidth)) canvasWidth = 1920;
-                    if (!int.TryParse(_config.GetSetting("MarqueeHeight", "360"), out canvasHeight)) canvasHeight = 360;
+                   canvasWidth = _config.MarqueeWidth;
+                   canvasHeight = _config.MarqueeHeight;
                 }
 
                 string text = $"{currentPoints}/{totalPoints} pts";
@@ -1797,7 +1877,8 @@ namespace RetroBatMarqueeManager.Application.Services
                     // EN: Adjust font size for small DMDs vs Large Marquee
                     // FR: Ajuster taille police pour petits DMD vs Grand Marquee
                     // Reduced sizes based on user feedback (overflow on DMD)
-                    int fontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : 22;
+                    // Dynamic scaling: Height / 24 (approx 15px at 360p, 45px at 1080p) - Reduced from /16 to avoid overlap
+                    int fontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : Math.Max(10, canvasHeight / 24);
                     var fontFamilyStr = _config.RAFontFamily;
                     var fontStyle = FontStyle.Bold;
                     
@@ -1995,17 +2076,23 @@ namespace RetroBatMarqueeManager.Application.Services
             try
             {
                 // EN: Calculate dimensions / FR: Calculer les dimensions
-                int badgeSize = isDmd ? 32 : 64;
-                int screenWidth = isDmd ? (_config.DmdWidth > 0 ? _config.DmdWidth : 128) : 1920;
-                int screenHeight = isDmd ? (_config.DmdHeight > 0 ? _config.DmdHeight : 32) : 360;
+                int screenWidth = isDmd ? (_config.DmdWidth > 0 ? _config.DmdWidth : 128) : _config.MarqueeWidth;
+                int screenHeight = isDmd ? (_config.DmdHeight > 0 ? _config.DmdHeight : 32) : _config.MarqueeHeight;
+                
+                // Dynamic badge size: Height / 7.2 (approx 50px at 360p, 150px at 1080p) - Reduced from /5.6
+                int badgeSize = isDmd ? 32 : (int)(screenHeight / 7.2);
                 
                 // EN: Locked badges show top 30% (peek effect) / FR: Badges verrouillés affichent haut 30% (effet aperçu)
                 double peekPercentage = 0.30;
                 int peekHeight = (int)(badgeSize * peekPercentage);
                 
+                // EN: Add safety padding at bottom to ensure visibility / FR: Ajouter marge sécurité en bas
+                int bottomPadding = 0; // Removed extra padding per user request to close gap
+
+                
                 // EN: Position badges so locked (30% top) stick to bottom edge (tile effect)
                 // FR: Positionner badges pour que locked (30% haut) collent au bord bas (effet tuile)
-                int baseY = screenHeight - peekHeight; // Locked badges at screen bottom
+                int baseY = screenHeight - peekHeight - bottomPadding; // Locked badges at screen bottom with padding
                 
                 // EN: Create transparent canvas / FR: Créer canevas transparent
                 using (var bitmap = new Bitmap(screenWidth, screenHeight, PixelFormat.Format32bppArgb))
@@ -2135,7 +2222,11 @@ namespace RetroBatMarqueeManager.Application.Services
                     {
                         using (var badges = Image.FromFile(badgesPath))
                         {
-                            int badgesY = screenHeight - badges.Height;
+                            // EN: Check if it's a full screen overlay (like notification) or a ribbon
+                            // FR: Vérifier s'il s'agit d'un overlay plein écran (comme une notif) ou d'un ruban
+                            bool isFullScreen = badges.Height == screenHeight && badges.Width == screenWidth;
+                            int badgesY = isFullScreen ? 0 : screenHeight - badges.Height;
+                            
                             g.DrawImage(badges, 0, badgesY, badges.Width, badges.Height);
                         }
                     }
@@ -2196,8 +2287,8 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
                 else
                 {
-                    if (!int.TryParse(_config.GetSetting("MarqueeWidth", "1920"), out canvasWidth)) canvasWidth = 1920;
-                    if (!int.TryParse(_config.GetSetting("MarqueeHeight", "360"), out canvasHeight)) canvasHeight = 360;
+                    canvasWidth = _config.MarqueeWidth;
+                    canvasHeight = _config.MarqueeHeight;
                 }
 
                 string text = $"{unlockedCount}/{totalCount}";
@@ -2227,7 +2318,8 @@ namespace RetroBatMarqueeManager.Application.Services
                     g.Clear(Color.Transparent);
 
                     // EN: Same style as score / FR: Même style que score
-                    int fontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : 22;
+                    // Dynamic scaling: Height / 24
+                    int fontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : Math.Max(10, canvasHeight / 24);
                     var fontStyle = FontStyle.Bold;
                     
                     Font? font = null;

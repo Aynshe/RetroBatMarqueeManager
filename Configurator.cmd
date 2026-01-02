@@ -1,0 +1,1 @@
+start "Configurator" RetroBatMarqueeManager.exe -menu

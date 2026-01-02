@@ -169,10 +169,29 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
         // RetroAchievements Settings
         // EN: Web API Key from https://retroachievements.org/settings / FR: Clé Web API depuis https://retroachievements.org/settings
         public string? RetroAchievementsWebApiKey => GetValue("RetroAchievementsWebApiKey", "");
-        public string MarqueeRetroAchievementsOverlays => GetValue("MarqueeRetroAchievementsOverlays", "");
+        public string MarqueeRetroAchievementsOverlays => GetValue("MarqueeRetroAchievementsOverlays", "score,badges,count");
+        public string MarqueeRetroAchievementsDisplayTarget => GetValue("MarqueeRetroAchievementsDisplayTarget", "both").ToLowerInvariant();
         public string RAFontFamily => GetValue("RAFontFamily", "Arial");
         public string ScreenScraperCachePath => Path.Combine(MarqueeImagePath, "screenscraper");
         public int ScreenScraperThreads => int.TryParse(GetValue("ScreenScraperThreads", "1"), out var ssThreads) ? Math.Max(1, ssThreads) : 1;
+        
+        // EN: Queue management settings / FR: Paramètres de gestion de la file d'attente
+        public int ScreenScraperQueueLimit => int.TryParse(GetValue("ScreenScraperQueueLimit", "5"), out var limit) ? Math.Max(1, limit) : 5;
+        public int ScreenScraperQueueKeep => int.TryParse(GetValue("ScreenScraperQueueKeep", "3"), out var keep) ? Math.Max(1, keep) : 3;
+
+        // Scraper Priority Manager
+        public List<string> ScraperPriorities 
+        {
+            get
+            {
+                var val = GetValue("PrioritySource", "ScreenScraper");
+                return val.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            }
+        }
+
+        // ArcadeItalia Settings
+        public string ArcadeItaliaUrl => GetValue("ArcadeItaliaUrl", "http://adb.arcadeitalia.net");
+        public string ArcadeItaliaMediaType => GetValue("ArcadeItaliaMediaType", "marquee"); // marquee, snapshot, title, cabinet
 
           // Logic Flags
         // MarqueeAutoGeneration moved to alias below
@@ -515,6 +534,8 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 { "ScreenScraperDevId", "" },
                 { "ScreenScraperDevPassword", "" },
                 { "ScreenScraperThreads", "1" },
+                { "ScreenScraperQueueLimit", "5" },
+                { "ScreenScraperQueueKeep", "3" },
                 { "MarqueeGlobalScraping", "false" },
                 { "AcceptedFormats", "png,jpg,jpeg,svg,mp4,gif" },
                 { "MinimizeToTray", "true" },
@@ -527,6 +548,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 
                 // RetroAchievements (NEW)
                 { "RetroAchievementsWebApiKey", "" },
+                { "MarqueeRetroAchievementsDisplayTarget", "both" },
                 
                 // Collections
                 { "CollectionCorrelation", "all:allgames,favorites:favorites,windowsgames:windows,2players:auto-at2players,4players:auto-at4players,zsegastv:segastv,ztaito:taito,zgaelco:gaelco,recent:auto-lastplayed,vertical:auto-verticalarcade,zmodel2:model2,zmodel3:model3,zcps1:cps1,zsega:sega" },
@@ -544,13 +566,16 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 { "DmdWidth", "128" },
                 { "DmdHeight", "32" },
                 { "DmdDotSize", "8" },
+
+                // ScrapersSource (NEW)
+                { "PrioritySource", "" },
+                
+                // ArcadeItalia (NEW)
+                { "ArcadeItaliaUrl", "http://adb.arcadeitalia.net" },
+                { "ArcadeItaliaMediaType", "marquee" },
                 
                 // IPC  
-                { "IPCChannel", @"\\.\pipe\mpv-pipe" },
                 { "ScreenNumber", "1" },
-                { "MPVPushRetroAchievementsDatas", @"echo {""command"":[""script-message"",""push-ra"",""{data}""]}>
-
-{IPCChannel}" },
                 
                 // Pinball
                 { "pinballfx", "True" },
@@ -619,8 +644,16 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 _settings["CollectionCorrelation"] = "all:allgames,favorites:favorites,windowsgames:windows,2players:auto-at2players,4players:auto-at4players,zsegastv:segastv,ztaito:taito,zgaelco:gaelco,recent:auto-lastplayed,vertical:auto-verticalarcade,zmodel2:model2,zmodel3:model3,zcps1:cps1,zsega:sega";
                 _settings["SystemAliases"] = "gamecube:gc,gw:gameandwatch,segamegadrive:megadrive,atarijaguargroup:atarijaguar,dos:pc";
 
+                // ScrapersSource
+                _settings["PrioritySource"] = "";
+
+                // ArcadeItalia
+                _settings["ArcadeItaliaUrl"] = "http://adb.arcadeitalia.net";
+                _settings["ArcadeItaliaMediaType"] = "marquee";
+
                 // RetroAchievements
                 _settings["RetroAchievementsWebApiKey"] = "";
+                _settings["MarqueeRetroAchievementsDisplayTarget"] = "both";
 
                 // DMD
                 _settings["DmdEnabled"] = "false";
@@ -636,9 +669,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 // DmdArguments removed from here so it falls back to WriteKey's "commented default" logic
                 
                 // ScreenMPV
-                _settings["IPCChannel"] = @"\\.\pipe\mpv-pipe";
                 _settings["ScreenNumber"] = "1";
-                _settings["MPVPushRetroAchievementsDatas"] = "echo {\"command\":[\"script-message\",\"push-ra\",\"\"{data}\"\"]}>{IPCChannel}";
                 
                 // Pinball
                 _settings["pinballfx"] = "True";
@@ -664,11 +695,8 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 WriteKey(sb, "RetroBatPath", @"C:\RetroBat", true);
                 WriteKey(sb, "RomsPath", @"C:\RetroBat\roms", true);
                 WriteKey(sb, "IMPath", @"tools\imagemagick\convert.exe");
-                WriteKey(sb, "MPVPath", @"tools\mpv\mpv.exe");
 
                 sb.AppendLine("; Marquee Settings");
-                WriteKey(sb, "MarqueeWidth", "1920");
-                WriteKey(sb, "MarqueeHeight", "360");
                 WriteKey(sb, "MarqueeBackgroundColor", "Black");
                 WriteKey(sb, "MarqueeBackgroundCodeColor", "#000000");
                 WriteKey(sb, "MarqueeCompose", "true");
@@ -684,8 +712,12 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 
                 sb.AppendLine("; RetroAchievements");
                 WriteKey(sb, "MarqueeRetroAchievements", "false"); // Ensure key exists
+                
+                sb.AppendLine("; Options: both | mpv | dmd");
+                WriteKey(sb, "MarqueeRetroAchievementsDisplayTarget", "both");
+
                 sb.AppendLine("; Options: score,badges,count");
-                WriteKey(sb, "MarqueeRetroAchievementsOverlays", "");
+                WriteKey(sb, "MarqueeRetroAchievementsOverlays", "score,badges,count");
                 sb.AppendLine("; Generate your Web API Key at: https://retroachievements.org/settings");
                 WriteKey(sb, "RetroAchievementsWebApiKey", "");
                 
@@ -700,28 +732,28 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 WriteKey(sb, "LogFilePath", @"logs\debug.log");
                 
                 sb.AppendLine("; Advanced");
-                sb.AppendLine("; Advanced ImageMagick Commands ({source}, {target}, {width}, {height}, {background})");
-                if (!_settings.ContainsKey("IMConvertCommand")) sb.AppendLine(";IMConvertCommand=-background none -density 300 \"{source}\" -resize {width}x{height} -background \"{background}\" -flatten -gravity center -extent {width}x{height} \"{target}\"");
-                else WriteKey(sb, "IMConvertCommand");
-
-                if (!_settings.ContainsKey("IMConvertCommandSVG")) sb.AppendLine(";IMConvertCommandSVG=-background none -density 300 \"{source}\" -resize {width}x{height} -background \"{background}\" -flatten -gravity center -extent {width}x{height} \"{target}\"");
-                else WriteKey(sb, "IMConvertCommandSVG");
-
-                // EN: Composition & Path Settings (Moved from ScreenScraper for better grouping)
-                // FR: Paramètres de composition et de chemins (Déplacés de ScreenScraper pour un meilleur groupement)
-                WriteKey(sb, "IMConvertCommandMarqueeGen", "", true);
-                WriteKey(sb, "IMConvertCommandMarqueeGenLogo", "", true);
-                WriteKey(sb, "SystemCustomMarqueePath", "");
-                WriteKey(sb, "GameCustomMarqueePath", "");
-                WriteKey(sb, "GameStartMediaPath", "");
                 
                 WriteKey(sb, "CollectionCorrelation", "all:allgames,favorites:favorites,windowsgames:windows,2players:auto-at2players,4players:auto-at4players,zsegastv:segastv,ztaito:taito,zgaelco:gaelco,recent:auto-lastplayed,vertical:auto-verticalarcade,zmodel2:model2,zmodel3:model3,zcps1:cps1,zsega:sega");
                 WriteKey(sb, "SystemAliases", "gamecube:gc,gw:gameandwatch,segamegadrive:megadrive,atarijaguargroup:atarijaguar,dos:pc");
 
+                // --- [ScrapersSource] ---
+                sb.AppendLine();
+                sb.AppendLine("[ScrapersSource]");
+                sb.AppendLine("; Master switch for scraping (true/false)");
+                WriteKey(sb, "MarqueeAutoScraping", "false");
+                sb.AppendLine("; Order of usage for scrapers (ScreenScraper, arcadeitalia)");
+                WriteKey(sb, "PrioritySource", "");
+
+                // --- [arcadeitalia] ---
+                sb.AppendLine();
+                sb.AppendLine("[arcadeitalia]");
+                WriteKey(sb, "ArcadeItaliaUrl", "http://adb.arcadeitalia.net");
+                sb.AppendLine("; Options: marquee, snapshot, title, cabinet");
+                WriteKey(sb, "ArcadeItaliaMediaType", "marquee");
+
                 // --- [ScreenScraper] ---
                 sb.AppendLine();
                 sb.AppendLine("[ScreenScraper]");
-                WriteKey(sb, "MarqueeAutoScraping", "false");
                 WriteKey(sb, "MarqueeGlobalScraping", "false");
                 sb.AppendLine("; ScreenScraper Media Types (Keys are case-sensitive!)");
                 sb.AppendLine("; Common Marquees: screenmarquee, screenmarqueesmall, wheel, wheel-carbon, wheel-steel, steamgrid");
@@ -736,12 +768,16 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 WriteKey(sb, "ScreenScraperDevPassword", "");
                 sb.AppendLine("; Number of concurrent scraping threads (Premium accounts)");
                 WriteKey(sb, "ScreenScraperThreads", "1");
+                sb.AppendLine("; EN: Max games in download queue (0=unlimited) / FR: Nombre max de jeux en file d'attente (0=illimité)");
+                WriteKey(sb, "ScreenScraperQueueLimit", "5");
+                sb.AppendLine("; EN: Games to keep when queue is full / FR: Jeux à conserver quand la file est pleine");
+                WriteKey(sb, "ScreenScraperQueueKeep", "3");
 
                 // --- [DMD] ---
                 sb.AppendLine();
                 sb.AppendLine("[DMD]");
                 WriteKey(sb, "DmdEnabled", "false");
-                sb.AppendLine("; Options: virtual, virtualdmd, pin2dmd, zedmd, zedmdhd, zedmdwifi, zedmdhdwifi, pindmd1, pindmd2, pindmd3, pindmdv3, pixelcade, alphanumeric, pinup, video, rawoutput, networkstream, browserstream, vpdbstream");
+                sb.AppendLine("; Options: virtual, virtualdmd, pin2dmd, zedmd, zedmdhd, zedmdwifi, zedmdhdwifi, pindmdv1, pindmdv2, pindmdv3, pixelcade, alphanumeric, pinup, video, rawoutput, networkstream, browserstream, vpdbstream");
                 WriteKey(sb, "DmdModel", "virtualdmd");
                 WriteKey(sb, "DmdExePath", @"tools\dmd\dmdext.exe");
                 WriteKey(sb, "DmdMediaPath", "");
@@ -772,20 +808,14 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 // --- [ScreenMPV] ---
                 sb.AppendLine();
                 sb.AppendLine("[ScreenMPV]");
-                WriteKey(sb, "IPCChannel", @"\\.\pipe\mpv-pipe");
+                WriteKey(sb, "MPVPath", @"tools\mpv\mpv.exe");
+                WriteKey(sb, "MarqueeWidth", "1920");
+                WriteKey(sb, "MarqueeHeight", "360");
+                WriteKey(sb, "SystemCustomMarqueePath", "");
+                WriteKey(sb, "GameCustomMarqueePath", "");
+                WriteKey(sb, "GameStartMediaPath", "");
                 sb.AppendLine("; MPV Screen Index (0=Primary, 1=Secondary, etc.)");
                 WriteKey(sb, "ScreenNumber", "1");
-                WriteKey(sb, "MPVPushRetroAchievementsDatas", "echo {\"command\":[\"script-message\",\"push-ra\",\"\"{data}\"\"]}>{IPCChannel}");
-                
-                string mpvCmdComment = ";MPVCustomCommand=\"{MPVPath}\" \"{DefaultImagePath}\" --idle --keep-open=yes --loop-file=inf --input-ipc-server={IPCChannel} --fs --screen={ScreenNumber} --background={MarqueeBackgroundCodeColor} --osd-level=0 --no-osc --mute=yes";
-                if (_settings.TryGetValue("MPVCustomCommand", out var userMpvCmd) && !string.IsNullOrWhiteSpace(userMpvCmd))
-                {
-                    sb.AppendLine($"MPVCustomCommand={userMpvCmd}");
-                }
-                else
-                {
-                    sb.AppendLine(mpvCmdComment);
-                }
 
                 // --- [Pinball] ---
                 sb.AppendLine();
@@ -810,12 +840,13 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 var handledKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) 
                 { 
                     "RetroBatPath", "RomsPath", "IMPath", "MPVPath", 
-                    "MarqueeWidth", "MarqueeHeight", "MarqueeBackgroundColor", "MarqueeBackgroundCodeColor", "MarqueeCompose", "ComposeMedia", "MarqueeLayout", "MarqueeAutoConvert", "MarqueeVideoGeneration", "MarqueeRetroAchievements", "MinimizeToTray", "AutoStart", "MarqueeAutoScraping", "AcceptedFormats", "LogToFile", "LogFilePath", "IMConvertCommand", "IMConvertCommandSVG", "IMConvertCommandMarqueeGen", "IMConvertCommandMarqueeGenLogo", "SystemCustomMarqueePath", "GameCustomMarqueePath", "GameStartMediaPath", "CollectionCorrelation", "SystemAliases",
+                    "MarqueeWidth", "MarqueeHeight", "MarqueeBackgroundColor", "MarqueeBackgroundCodeColor", "MarqueeCompose", "ComposeMedia", "MarqueeLayout", "MarqueeAutoConvert", "MarqueeVideoGeneration", "MarqueeRetroAchievements", "MinimizeToTray", "AutoStart", "MarqueeAutoScraping", "AcceptedFormats", "LogToFile", "LogFilePath", "SystemCustomMarqueePath", "GameCustomMarqueePath", "GameStartMediaPath", "CollectionCorrelation", "SystemAliases",
                     "DmdEnabled", "DmdModel", "DmdExePath", "DmdMediaPath", "SystemCustomDMDPath", "DmdGameStartMediaPath", "DmdCompose", "DmdFormat", "DmdArguments", "DmdWidth", "DmdHeight", "DmdDotSize",
-                    "IPCChannel", "ScreenNumber", "MPVPushRetroAchievementsDatas", "MPVCustomCommand",
+                    "ScreenNumber",
                     "pinballfx", "pinballfx2", "pinballfx3", "fpinball", "zaccariapinball", "custom1",
                     "MPVScrapMediaType", "DMDScrapMediaType", "ScreenScraperUser", "ScreenScraperPass", "ScreenScraperDevId", "ScreenScraperDevPassword", "MarqueeGlobalScraping", "ScreenScraperThreads",
-                    "RetroAchievementsWebApiKey", "GenerateMarqueeVideoFolder", "MarqueeRetroAchievementsOverlays", "RAFontFamily"
+                    "MPVScrapMediaType", "DMDScrapMediaType", "ScreenScraperUser", "ScreenScraperPass", "ScreenScraperDevId", "ScreenScraperDevPassword", "MarqueeGlobalScraping", "ScreenScraperThreads",
+                    "RetroAchievementsWebApiKey", "GenerateMarqueeVideoFolder", "MarqueeRetroAchievementsOverlays", "RAFontFamily", "PrioritySource", "ArcadeItaliaUrl", "ArcadeItaliaMediaType", "MarqueeRetroAchievementsDisplayTarget"
                 };
 
                 foreach(var kvp in _settings)

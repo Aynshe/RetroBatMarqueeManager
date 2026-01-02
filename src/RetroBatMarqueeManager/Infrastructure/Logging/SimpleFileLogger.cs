@@ -51,7 +51,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Logging
             if (!IsEnabled(logLevel)) return;
 
             var message = formatter(state, exception);
-            var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{logLevel}] [{_categoryName}] {message}";
+            var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{logLevel}] [{_categoryName}] {message}";
 
             if (exception != null)
             {

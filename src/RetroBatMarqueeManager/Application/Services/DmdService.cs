@@ -163,7 +163,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 // DmdDevice 2.0+ expects Fit, Fill, or Stretch. Legacy used WxH.
                 // Reverting to WxH because 'Fit' causes crash with GIFs on VirtualDMD?
                 // FR: Retour à WxH car 'Fit' semble planter le VirtualDMD avec des GIFs
-                UpdateKey("global", "resize", $"{_config.DmdWidth}x{_config.DmdHeight}");
+                UpdateKey("global", "resize", "Fit");
                  
                 // 2. MODELS: Enable/Disable based on selection
                 var selectedModel = _config.DmdModel.ToLowerInvariant();
@@ -181,7 +181,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     "virtual", "virtualdmd", 
                     "pin2dmd", 
                     "zedmd", "zedmdhd", "zedmdwifi", "zedmdhdwifi", 
-                    "pindmd1", "pindmd2", "pindmd3", "pindmdv3", 
+                    "pindmdv1", "pindmdv2", "pindmdv3", 
                     "pixelcade", "alphanumeric", 
                     "pinup", 
                     "rawoutput", 

@@ -12,8 +12,10 @@ using RetroBatMarqueeManager.Core.Interfaces;
 
 namespace RetroBatMarqueeManager.Application.Services
 {
-    public class ScreenScraperService
+    public class ScreenScraperService : IScraperService
     {
+        public string Name => "ScreenScraper";
+        public event Action<string, string, string?>? OnScrapeCompleted;
         private readonly ILogger<ScreenScraperService> _logger;
         private readonly IConfigService _config;
         private static readonly HttpClient _httpClient;
@@ -44,7 +46,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
         // Dev credentials (should ideally be secure or passed in, but using generic specific ones for this app if available, or user provided)
         // Using generic dev info for now or relying on User provided params.
-        private const string SoftName = "Retrobat-Marquee-Manager-v.3.0";
+        private const string SoftName = "CustomRetroBatMarqueeManager";
 
         public ScreenScraperService(ILogger<ScreenScraperService> logger, IConfigService config)
         {
@@ -175,7 +177,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
             string downloadKey = $"{systemName}_{gameName}_{mediaType}";
 
-            // EN: If already failed in this session, don't try again (don't show "Scraping..." placeholder)
+            // EN: If already failed in this session, do not try again (avoid "Scraping..." placeholder)
             // FR: Si déjà échoué dans cette session, ne pas retenter (évite le placeholder "Scraping...")
             lock (_failedLock)
             {
@@ -269,10 +271,16 @@ namespace RetroBatMarqueeManager.Application.Services
 
                 if (string.IsNullOrWhiteSpace(devId) || string.IsNullOrWhiteSpace(devPassword))
                 {
-                     // SANITIZED FOR GITHUB
-                     devId = ""; 
-                     devPassword = "";
-                     softName = "ESEventsScrapTopper"; 
+                     _logger.LogInformation("[ScreenScraper] Dev credentials missing in config, using default app credentials.");
+                     // EN: Default App Credentials
+                     // FR: Identifiants par défaut de l'application
+                     devId = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String("BASE64_DEV_ID_HERE")); // TODO: Replace with new DevID Base64 if provided
+                     devPassword = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String("BASE64_DEV_PASSWORD_HERE")); // TODO: Replace with new Password Base64
+                     softName = "RetroBatMarqueeManager"; 
+                }
+                else
+                {
+                     _logger.LogInformation($"[ScreenScraper] Using custom Dev credentials from config (SoftName: {softName})");
                 }
 
                 var fileInfo = new FileInfo(gamePath);
@@ -329,7 +337,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     var retryParams = new Dictionary<string, string>(parameters);
                     retryParams.Remove("crc");
                     retryParams["romnom"] = romNameNoExt;
- 
+                    
                     var found = await CallWithRetryAsync(() => CallApiAndExtractMedia(retryParams, scrapMediaType, isSearch: false, forceStrict: true));
                     mediaUrl = found.mediaUrl;
                     mediaExt = found.mediaExt;
@@ -421,6 +429,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
                     await DownloadFileAsync(mediaUrl, cacheFilePath);
                     _logger.LogInformation($"[Background Scrap Success] Downloaded media to {cacheFilePath}");
+                    OnScrapeCompleted?.Invoke(systemName, gameName, cacheFilePath);
                     return cacheFilePath;
                 }
                 else
@@ -428,12 +437,17 @@ namespace RetroBatMarqueeManager.Application.Services
                     _logger.LogWarning($"[Background Scrap] Media '{scrapMediaType}' not found for {gameName} after all fallback attempts (CRC, Name, DisplayName Search).");
                     lock (_failedLock) { _failedScraps.Add(downloadKey); }
                     SaveFailedScraps();
+                    
+                    // Notify failure so listeners can unblock/fallback
+                    OnScrapeCompleted?.Invoke(systemName, gameName, null);
                     return null;
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogError($"Background scraping error for {gameName}: {ex.Message}");
+                // Notify failure on error too
+                OnScrapeCompleted?.Invoke(systemName, gameName, null);
             }
             finally
             {

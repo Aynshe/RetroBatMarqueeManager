@@ -41,12 +41,20 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         string MPVScrapMediaType { get; }
         string DMDScrapMediaType { get; }
         bool MarqueeGlobalScraping { get; }
+        // Scraper Priority Manager
+        List<string> ScraperPriorities { get; } // [ScrapersSource] PrioritySource=...
+        // ArcadeItalia Settings
+        string ArcadeItaliaUrl { get; }
+        string ArcadeItaliaMediaType { get; }
+
         string ScreenScraperUser { get; }
         string ScreenScraperPass { get; }
         string ScreenScraperDevId { get; }
         string ScreenScraperDevPassword { get; }
         string ScreenScraperCachePath { get; }
         int ScreenScraperThreads { get; }
+        int ScreenScraperQueueLimit { get; } // EN: Max games in download queue / FR: Nombre max de jeux en file d'attente
+        int ScreenScraperQueueKeep { get; } // EN: Games to keep when pruning queue / FR: Jeux à conserver lors de l'élagage
         bool MarqueeAutoConvert { get; }
         
         // Logging
@@ -77,6 +85,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         // RetroAchievements Settings
         string? RetroAchievementsWebApiKey { get; }
         string MarqueeRetroAchievementsOverlays { get; }
+        string MarqueeRetroAchievementsDisplayTarget { get; } // EN: Target for RA display (dmd, mpv, both)
         string RAFontFamily { get; }
         
         // DMD Settings
@@ -117,7 +126,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
     {
         Task InitializeAsync(string esSettingsPath);
         Task<string?> FindMarqueeFileAsync(string eventType, string param1, string param2, string param3, string param4);
-        Task<string?> FindDmdImageAsync(string system, string gameName, string romFileName, string romPath = "", bool allowVideo = true);
+        Task<string?> FindDmdImageAsync(string system, string gameName, string romFileName, string romPath = "", bool allowVideo = true, bool allowScraping = true);
         string? FindDmdGameStartMedia(string system, string romFileName, string gameName);
         string? FindGameStartMedia(string system, string romFileName, string gameName);
         
@@ -135,7 +144,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
 
     public interface IMarqueeWorkFlow
     {
-        Task ProcessEventAsync(string eventName, string param1, string param2, string param3, string param4); 
+        Task ProcessEventAsync(string eventName, string param1, string param2, string param3, string param4, System.Threading.CancellationToken token = default); 
     }
 
     public interface IDmdService

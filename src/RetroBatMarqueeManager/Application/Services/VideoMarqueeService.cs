@@ -195,6 +195,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 // EN: Build FFmpeg filter with offsets
                 // FR: Construire le filtre FFmpeg avec offsets
                 string filter = BuildFilterWithOffsets(mw, mh, offsets, !string.IsNullOrEmpty(logoPath) && File.Exists(logoPath));
+                _logger.LogInformation($"[VideoGen] Generated Filter: {filter}");
 
                 var startInfo = new ProcessStartInfo
                 {
@@ -298,9 +299,18 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 sb.Append("[base];");
 
-                // Logo processing: scale
-                int logoH = (int)(targetHeight * 0.8 * offsets.LogoScale);
-                sb.Append($"[1:v]scale=-1:{logoH}[logo];");
+                // Logo processing: scale within constraints
+                // EN: Adaptive Scaling based on Aspect Ratio
+                // If AR > 2.5 (Ultrawide/Marquee): Use 80% Height (Logo needs to be big to be seen on strip)
+                // If AR <= 2.5 (Standard/Box 16:9, 4:3, 2:1): Use 40% Height (Logo shouldn't dominate the video)
+                
+                double ar = (double)targetWidth / targetHeight;
+                double heightFactor = (ar > 2.5) ? 0.8 : 0.4;
+                
+                int maxW = (int)(targetWidth * 0.90);
+                int maxH = (int)(targetHeight * heightFactor * offsets.LogoScale);
+                
+                sb.Append($"[1:v]scale={maxW}:{maxH}:force_original_aspect_ratio=decrease[logo];");
 
                 // Overlay logo at custom position
                 sb.Append($"[base][logo]overlay={offsets.LogoX}:{offsets.LogoY},format=yuv420p");

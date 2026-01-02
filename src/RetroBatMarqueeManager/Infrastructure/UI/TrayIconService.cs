@@ -92,11 +92,24 @@ namespace RetroBatMarqueeManager.Infrastructure.UI
                 {
                      try
                      {
-                         Process.Start(new ProcessStartInfo(_config.ConfigPath) { UseShellExecute = true });
+                         // EN: Launch the Configuration Menu instead of opening config.ini text file
+                         // FR: Lancer le menu de configuration au lieu d'ouvrir le fichier texte config.ini
+                         // Target the Launcher executable explicitly
+                         var launcherPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RetroBatMarqueeManager.exe");
+                         
+                         if (File.Exists(launcherPath))
+                         {
+                              Process.Start(new ProcessStartInfo(launcherPath, "-menu") { UseShellExecute = true });
+                         }
+                         else
+                         {
+                              // Fallback if launcher not found (should not happen)
+                              Process.Start(new ProcessStartInfo(_config.ConfigPath) { UseShellExecute = true });
+                         }
                      }
                      catch (Exception ex)
                      {
-                         _logger.LogError($"Failed to open config: {ex.Message}");
+                         _logger.LogError($"Failed to open config menu: {ex.Message}");
                      }
                 };
                 contextMenu.Items.Add(configItem);
@@ -150,6 +163,14 @@ namespace RetroBatMarqueeManager.Infrastructure.UI
                                        File.Delete(offsetsPath);
                                        deletedCount++;
                                        _logger.LogInformation("Deleted offsets.json");
+                                   }
+
+                                   var videoOffsetsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "video_offsets.json");
+                                   if (File.Exists(videoOffsetsPath))
+                                   {
+                                       File.Delete(videoOffsetsPath);
+                                       deletedCount++;
+                                       _logger.LogInformation("Deleted video_offsets.json");
                                    }
                               }
                               catch (Exception ex)

@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RetroBat Marquee Manager - Documentation</title>
+    <style>
+        :root {
+            --primary-color: #0078d4;
+            --bg-color: #f8f9fa;
+            --text-color: #333;
+            --sidebar-bg: #2d2d30;
+            --sidebar-text: #dcdcdc;
+            --card-bg: #ffffff;
+            --border-color: #e0e0e0;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        nav {
+            width: 280px;
+            background-color: var(--sidebar-bg);
+            color: var(--sidebar-text);
+            padding: 20px;
+            height: 100%;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        nav h2 {
+            font-size: 1.2rem;
+            color: #fff;
+            margin-top: 0;
+        }
+
+        nav ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        nav li {
+            margin-bottom: 10px;
+        }
+
+        nav a {
+            color: var(--sidebar-text);
+            text-decoration: none;
+            font-size: 0.95rem;
+            transition: color 0.2s;
+        }
+
+        nav a:hover {
+            color: var(--primary-color);
+        }
+
+        /* Main Content */
+        main {
+            flex-grow: 1;
+            padding: 0;
+            height: 100%;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+
+        header {
+            background-color: #fff;
+            padding: 15px 40px;
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 {
+            font-size: 1.5rem;
+            margin: 0;
+            color: var(--primary-color);
+        }
+
+        .lang-toggle {
+            display: flex;
+            gap: 10px;
+        }
+
+        .lang-btn {
+            padding: 5px 15px;
+            border: 1px solid var(--primary-color);
+            background: none;
+            color: var(--primary-color);
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+
+        .lang-btn.active {
+            background-color: var(--primary-color);
+            color: #fff;
+        }
+
+        .content-section {
+            padding: 40px;
+            max-width: 1000px;
+            margin: 0;
+        }
+
+        h2 {
+            border-bottom: 2px solid var(--primary-color);
+            padding-bottom: 5px;
+            margin-top: 40px;
+        }
+
+        h3 {
+            color: var(--primary-color);
+            margin-top: 30px;
+        }
+
+        .config-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .config-key {
+            font-weight: bold;
+            font-family: Consolas, monospace;
+            color: #d13438;
+        }
+
+        .config-desc {
+            margin-top: 5px;
+            color: #666;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: #fff;
+        }
+
+        th,
+        td {
+            border: 1px solid var(--border-color);
+            padding: 12px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f1f1f1;
+        }
+
+        code {
+            background-color: #f0f0f0;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: Consolas, monospace;
+        }
+
+        pre {
+            background-color: #2d2d30;
+            color: #dcdcdc;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+
+        .lang-en,
+        .lang-fr {
+            display: none;
+        }
+
+        .active-lang {
+            display: block;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+            border-left: 5px solid;
+        }
+
+        .alert-important {
+            background-color: #fff9db;
+            border-color: #f59f00;
+        }
+
+        .alert-caution {
+            background-color: #fff5f5;
+            border-color: #fa5252;
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav>
+        <h2 class="lang-en">Navigation</h2>
+        <h2 class="lang-fr">Navigation</h2>
+        <ul>
+            <li><a href="#welcome" class="lang-en">Welcome</a><a href="#welcome" class="lang-fr">Bienvenue</a></li>
+            <li><a href="#features" class="lang-en">Main Features</a><a href="#features"
+                    class="lang-fr">Fonctionnalités</a></li>
+            <li><a href="#config-menu" class="lang-en">Config Menu</a><a href="#config-menu" class="lang-fr">Menu
+                    Config</a></li>
+            <li><a href="#controls" class="lang-en">In-Game Controls</a><a href="#controls" class="lang-fr">Contrôles en
+                    jeu</a></li>
+            <li><a href="#config-general" class="lang-en">General Config</a><a href="#config-general"
+                    class="lang-fr">Config Générale</a></li>
+            <li><a href="#config-scrapers" class="lang-en">Scrapers Config</a><a href="#config-scrapers"
+                    class="lang-fr">Config Scrapers</a></li>
+            <li><a href="#config-dmd" class="lang-en">DMD Config</a><a href="#config-dmd" class="lang-fr">Config DMD</a>
+            </li>
+            <li><a href="#config-mpv" class="lang-en">MPV Config</a><a href="#config-mpv" class="lang-fr">Config MPV</a>
+            </li>
+            <li><a href="#config-achievements" class="lang-en">RetroAchievements</a><a href="#config-achievements"
+                    class="lang-fr">RetroAchievements</a></li>
+            <li><a href="#pinball" class="lang-en">Pinball Support</a><a href="#pinball" class="lang-fr">Support
+                    Pinball</a></li>
+        </ul>
+    </nav>
+
+    <main>
+        <header>
+            <h1 class="lang-en">RetroBat Marquee Manager</h1>
+            <h1 class="lang-fr">RetroBat Marquee Manager</h1>
+            <div class="lang-toggle">
+                <button onclick="setLang('en')" id="btn-en" class="lang-btn">EN</button>
+                <button onclick="setLang('fr')" id="btn-fr" class="lang-btn">FR</button>
+            </div>
+        </header>
+
+        <div class="content-section">
+            <div id="welcome">
+                <div class="lang-en">
+                    <p>Welcome to <strong>RetroBat Marquee Manager</strong>. This tool dynamically displays marquees for
+                        your systems and games on a second screen or DMD hardware.</p>
+                </div>
+                <div class="lang-fr">
+                    <p>Bienvenue dans <strong>RetroBat Marquee Manager</strong>. Cet outil affiche dynamiquement les
+                        marquees pour vos systèmes et jeux sur un second écran ou un matériel DMD.</p>
+                </div>
+            </div>
+
+            <div id="config-menu">
+                <h2 class="lang-en">Configuration Menu</h2>
+                <h2 class="lang-fr">Menu de Configuration</h2>
+                <div class="lang-en">
+                    <p>You can access the configuration interface in two ways:</p>
+                    <ul>
+                        <li><strong>From System Tray:</strong> Right-click the RetroBat Marquee Manager icon in the
+                            taskbar and select <strong>Configuration</strong>.</li>
+                        <li><strong>Via Command Line:</strong> Launch the application with the <code>-menu</code>
+                            argument:
+                            <pre>RetroBatMarqueeManager.exe -menu</pre>
+                        </li>
+                    </ul>
+                    <p><em>Note: On the first run (if no config.ini exists), the menu will open automatically.</em></p>
+                </div>
+                <div class="lang-fr">
+                    <p>Vous pouvez accéder à l'interface de configuration de deux manières :</p>
+                    <ul>
+                        <li><strong>Depuis la Zone de Notification :</strong> Clic-droit sur l'icône RetroBat Marquee
+                            Manager dans la barre des tâches et sélectionnez <strong>Configuration</strong>.</li>
+                        <li><strong>Via Ligne de Commande :</strong> Lancez l'application avec l'argument
+                            <code>-menu</code> :
+                            <pre>RetroBatMarqueeManager.exe -menu</pre>
+                        </li>
+                    </ul>
+                    <p><em>Note : Au premier lancement (si config.ini n'existe pas), le menu s'ouvrira
+                            automatiquement.</em></p>
+                </div>
+            </div>
+
+            <div id="features">
+                <h2 class="lang-en">Main Features</h2>
+                <h2 class="lang-fr">Principales Fonctionnalités</h2>
+                <ul class="lang-en">
+                    <li><strong>Dynamic Display</strong>: Auto-detection of systems, collections, and games.</li>
+                    <li><strong>Smart Composition</strong>: Automatic Logo + Fanart merging.</li>
+                    <li><strong>Media Support</strong>: PNG, JPG, SVG, and MP4 animations via MPV.</li>
+                    <li><strong>Live Real-Time Editor</strong>: Adjust positions directly on screen while playing.</li>
+                </ul>
+                <ul class="lang-fr">
+                    <li><strong>Affichage Dynamique</strong> : Auto-détection des systèmes, collections et jeux.</li>
+                    <li><strong>Composition Intelligente</strong> : Fusion automatique Logo + Fanart.</li>
+                    <li><strong>Support Médias</strong> : PNG, JPG, SVG et animations MP4 via MPV.</li>
+                    <li><strong>Éditeur Temps Réel</strong> : Ajustez les positions directement à l'écran en jouant.
+                    </li>
+                </ul>
+            </div>
+
+            <div id="controls">
+                <h2 class="lang-en">In-Game Live Editor Controls</h2>
+                <h2 class="lang-fr">Contrôles de l'Éditeur en Jeu</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="lang-en">Action</th>
+                            <th class="lang-fr">Action</th>
+                            <th class="lang-en">Shortcut</th>
+                            <th class="lang-fr">Raccourci</th>
+                            <th class="lang-en">Description</th>
+                            <th class="lang-fr">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="lang-en">Move Background</td>
+                            <td class="lang-fr">Déplacer Fond</td>
+                            <td>Ctrl + U/J/H/K</td>
+                            <td class="lang-en">Adjust Fanart or Video Crop position.</td>
+                            <td class="lang-fr">Ajuster la position du Fanart ou du recadrage Vidéo.</td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Move Foreground</td>
+                            <td class="lang-fr">Déplacer Logo</td>
+                            <td>Alt + U/J/H/K</td>
+                            <td class="lang-en">Adjust Game Logo position.</td>
+                            <td class="lang-fr">Ajuster la position du Logo du jeu.</td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Zoom Background</td>
+                            <td class="lang-fr">Zoom Fond</td>
+                            <td>Ctrl + N / B</td>
+                            <td class="lang-en">Zoom In / Out for background media.</td>
+                            <td class="lang-fr">Zoom Avant / Arrière pour le média de fond.</td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Scale Foreground</td>
+                            <td class="lang-fr">Taille Logo</td>
+                            <td>Alt + N / B</td>
+                            <td class="lang-en">Scale Logo Up / Down.</td>
+                            <td class="lang-fr">Agrandir / Réduire le Logo.</td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Adjustment Mode</td>
+                            <td class="lang-fr">Mode Ajustement</td>
+                            <td>Ctrl + V</td>
+                            <td class="lang-en">Enter Video/Logo Layout Adjustment mode (Static).</td>
+                            <td class="lang-fr">Entrer en mode ajustement Video/Logo (Statique).</td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Trimming Mode</td>
+                            <td class="lang-fr">Mode Découpe</td>
+                            <td>Ctrl + P</td>
+                            <td class="lang-en">Toggle Video Playback for trimming (must be in Adjustment Mode).</td>
+                            <td class="lang-fr">Activer la lecture Vidéo pour la découpe (doit être en mode ajustement).
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Set Trim Start</td>
+                            <td class="lang-fr">Début Découpe</td>
+                            <td>Ctrl + I</td>
+                            <td class="lang-en">Mark current time as video start.</td>
+                            <td class="lang-fr">Marquer le temps actuel comme début de vidéo.</td>
+                        </tr>
+                        <tr>
+                            <td class="lang-en">Set Trim End</td>
+                            <td class="lang-fr">Fin Découpe</td>
+                            <td>Ctrl + O</td>
+                            <td class="lang-en">Mark current time as video end.</td>
+                            <td class="lang-fr">Marquer le temps actuel comme fin de vidéo.</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p class="lang-en"><em>Note: U/J/H/K keys correspond to: Up, Down, Left, Right. To edit a video, first
+                        press <strong>Ctrl+V</strong> to enter adjustment mode, then <strong>Ctrl+P</strong> to start
+                        playback and set trim points.</em></p>
+                <p class="lang-fr"><em>Note : Les touches U/J/H/K correspondent à : Haut, Bas, Gauche, Droite. Pour
+                        éditer une vidéo, appuyez d'abord sur <strong>Ctrl+V</strong> pour entrer en mode ajustement,
+                        puis <strong>Ctrl+P</strong> pour lancer la lecture et définir les points de découpe.</em></p>
+            </div>
+
+            <div id="config-general">
+                <h2 class="lang-en">General Configuration ([Settings])</h2>
+                <h2 class="lang-fr">Configuration Générale ([Settings])</h2>
+
+                <div class="config-card">
+                    <span class="config-key">MarqueeCompose</span>
+                    <p class="lang-en config-desc">Enable (true) or disable (false) the automatic merging of logo and
+                        fanart background.</p>
+                    <p class="lang-fr config-desc">Active (true) ou désactive (false) la fusion automatique du logo et
+                        du fond fanart.</p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">ComposeMedia</span>
+                    <p class="lang-en config-desc">Preferred media type for background: <code>fanart</code> or
+                        <code>image</code> (boxart/screenshot).
+                    </p>
+                    <p class="lang-fr config-desc">Type de média préféré pour le fond : <code>fanart</code> ou
+                        <code>image</code> (boxart/screenshot).
+                    </p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">MarqueeVideoGeneration</span>
+                    <p class="lang-en config-desc">Automatically create marquee videos from existing game preview clips.
+                    </p>
+                    <p class="lang-fr config-desc">Génère automatiquement des vidéos de marquee à partir des extraits
+                        d'aperçu de jeu existants.</p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">AutoStart</span>
+                    <p class="lang-en config-desc">Options: <code>false</code> (off), <code>windows</code> (Scheduled
+                        Task), <code>retrobat</code> (plugin script).</p>
+                    <p class="lang-fr config-desc">Options : <code>false</code> (désactivé), <code>windows</code> (Tâche
+                        planifiée), <code>retrobat</code> (script plugin).</p>
+
+                    <div class="alert alert-important lang-en">
+                        <strong>Important:</strong> To switch from <code>windows</code> to <code>retrobat</code> (or
+                        vice-versa), you must first set it to <code>false</code>, save, restart the application, and
+                        then select the new mode.
+                    </div>
+                    <div class="alert alert-important lang-fr">
+                        <strong>Important :</strong> Pour passer de <code>windows</code> à <code>retrobat</code> (ou
+                        inversement), vous devez d'abord mettre sur <code>false</code>, enregistrer, redémarrer
+                        l'application, puis seulement ensuite choisir le nouveau mode.
+                    </div>
+                </div>
+            </div>
+
+            <div id="config-scrapers">
+                <h2 class="lang-en">Scrapers ([ScrapersSource] & [ScreenScraper])</h2>
+                <h2 class="lang-fr">Scrapers ([ScrapersSource] & [ScreenScraper])</h2>
+
+                <div class="config-card">
+                    <span class="config-key">MarqueeAutoScraping</span>
+                    <p class="lang-en config-desc">Enables automatic media scraping using sources defined in 'Priority
+                        Source'. Scraped media takes priority over default images found in the ROM folder.</p>
+                    <p class="lang-fr config-desc">Active le scraping automatique via les sources définies dans 'Source
+                        Prioritaire'. Les médias scrapés sont prioritaires sur les images par défaut du dossier ROM.</p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">PrioritySource</span>
+                    <p class="lang-en config-desc">Order of usage for scrapers, comma-separated (e.g.
+                        <code>ScreenScraper, arcadeitalia</code>).
+                    </p>
+                    <p class="lang-fr config-desc">Ordre d'utilisation des scrapers, séparé par des virgules (ex:
+                        <code>ScreenScraper, arcadeitalia</code>).
+                    </p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">ScreenScraper Media Types</span>
+                    <div class="lang-en">
+                        <p class="config-desc">Valid values for MPV/DMD Scrap Media Type:</p>
+                        <ul>
+                            <li><code>screenmarquee</code>: High quality marquee (recommended for MPV).</li>
+                            <li><code>screenmarqueesmall</code>: Smaller marquee (recommended for DMD).</li>
+                            <li><code>wheel</code>: Clear logo.</li>
+                            <li><code>fanart</code>: Full background art.</li>
+                            <li><code>video</code>: Video snap (MP4).</li>
+                            <li><code>box-2D</code> / <code>box-3D</code>: Box art.</li>
+                        </ul>
+                    </div>
+                    <div class="lang-fr">
+                        <p class="config-desc">Valeurs valides pour MPV/DMD Scrap Media Type :</p>
+                        <ul>
+                            <li><code>screenmarquee</code> : Marquee haute qualité (recommandé pour MPV).</li>
+                            <li><code>screenmarqueesmall</code> : Marquee réduit (recommandé pour DMD).</li>
+                            <li><code>wheel</code> : Logo détouré.</li>
+                            <li><code>fanart</code> : Fond artistique complet.</li>
+                            <li><code>video</code> : Extrait vidéo (MP4).</li>
+                            <li><code>box-2D</code> / <code>box-3D</code> : Boîte du jeu.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div id="config-dmd">
+                <h2 class="lang-en">DMD Configuration ([DMD])</h2>
+                <h2 class="lang-fr">Configuration DMD ([DMD])</h2>
+
+                <div class="config-card">
+                    <span class="config-key">DmdModel</span>
+                    <p class="lang-en config-desc">Hardware model: <code>virtualdmd</code>, <code>pin2dmd</code>,
+                        <code>zedmd</code>, <code>pixelcade</code>, etc.
+                    </p>
+                    <p class="lang-fr config-desc">Modèle matériel : <code>virtualdmd</code>, <code>pin2dmd</code>,
+                        <code>zedmd</code>, <code>pixelcade</code>, etc.
+                    </p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">DmdWidth / DmdHeight</span>
+                    <p class="lang-en config-desc">Resolution of the DMD panel (standard: 128x32).</p>
+                    <p class="lang-fr config-desc">Résolution du panneau DMD (standard : 128x32).</p>
+                </div>
+            </div>
+
+            <div id="config-mpv">
+                <h2 class="lang-en">MPV Screen Configuration ([ScreenMPV])</h2>
+                <h2 class="lang-fr">Configuration Écran MPV ([ScreenMPV])</h2>
+
+                <div class="config-card">
+                    <span class="config-key">ScreenNumber</span>
+                    <p class="lang-en config-desc">Index of the secondary monitor (0=Primary, 1=Second, etc.). Set to
+                        <code>false</code> to disable the MPV screen.
+                    </p>
+                    <p class="lang-fr config-desc">Index du moniteur secondaire (0=Principal, 1=Second, etc.). Mettre
+                        sur <code>false</code> pour désactiver l'écran MPV.</p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">MarqueeWidth / MarqueeHeight</span>
+                    <p class="lang-en config-desc">Target resolution for the marquee display area.</p>
+                    <p class="lang-fr config-desc">Résolution cible pour la zone d'affichage de la marquee.</p>
+                </div>
+            </div>
+
+            <div id="config-achievements">
+                <h2 class="lang-en">RetroAchievements Integration</h2>
+                <h2 class="lang-fr">Intégration RetroAchievements</h2>
+                <div class="config-card">
+                    <span class="config-key">RetroAchievements API Key</span>
+                    <p class="lang-en config-desc">Your personal Web API Key found in your RetroAchievements account
+                        settings (Settings > Keys > Web API Key).</p>
+                    <p class="lang-fr config-desc">Votre clé API Web personnelle trouvée dans les paramètres de votre
+                        compte RetroAchievements (Settings > Keys > Web API Key).</p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">Display Target</span>
+                    <p class="lang-en config-desc">Where to display the achievements info: <code>mpv</code> (Marquee
+                        screen), <code>dmd</code> (DMD display), or <code>both</code>.</p>
+                    <p class="lang-fr config-desc">Où afficher les infos de succès : <code>mpv</code> (écran Marquee),
+                        <code>dmd</code> (affichage DMD), ou <code>both</code> (les deux).
+                    </p>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">Overlay Types</span>
+                    <div class="lang-en">
+                        <p class="config-desc">List of overlays to display, separated by commas. Options:</p>
+                        <ul>
+                            <li><code>score</code>: Shows user hardcore points.</li>
+                            <li><code>badges</code>: Shows game achievement badges.</li>
+                            <li><code>count</code>: Shows progress (e.g. 10/45).</li>
+                        </ul>
+                        <p class="config-desc">Example: <code>score,badges</code></p>
+                    </div>
+                    <div class="lang-fr">
+                        <p class="config-desc">Liste des overlays à afficher, séparés par des virgules. Options :</p>
+                        <ul>
+                            <li><code>score</code> : Affiche les points hardcore de l'utilisateur.</li>
+                            <li><code>badges</code> : Affiche les badges des succès du jeu.</li>
+                            <li><code>count</code> : Affiche la progression (ex: 10/45).</li>
+                        </ul>
+                        <p class="config-desc">Exemple : <code>score,badges</code></p>
+                    </div>
+                </div>
+            </div>
+
+            <div id="pinball">
+                <h2 class="lang-en">Pinball Support ([Pinball])</h2>
+                <h2 class="lang-fr">Support Pinball ([Pinball])</h2>
+                <p class="lang-en">Specific behavior for pinball systems (stopping internal DMD or MPV to let external
+                    apps manage the marquee).</p>
+                <p class="lang-fr">Comportement spécifique pour les systèmes de flipper (arrêt du DMD interne ou de MPV
+                    pour laisser les apps externes gérer la marquee).</p>
+                <pre>pinballfx3=dmdext.exe mirror --source=pinballfx3 -d {DmdModel} --quit-when-done</pre>
+            </div>
+
+            <footer>
+                <hr>
+                <p class="lang-en">© 2025 RetroBat Team. Built for RetroBat community.</p>
+                <p class="lang-fr">© 2025 RetroBat Team. Développé pour la communauté RetroBat.</p>
+            </footer>
+        </div>
+    </main>
+
+    <script>
+        function setLang(lang) {
+            // Update UI classes
+            document.querySelectorAll('.lang-en').forEach(el => {
+                el.classList.toggle('active-lang', lang === 'en');
+                if (el.tagName === 'A') el.style.display = lang === 'en' ? 'block' : 'none';
+            });
+            document.querySelectorAll('.lang-fr').forEach(el => {
+                el.classList.toggle('active-lang', lang === 'fr');
+                if (el.tagName === 'A') el.style.display = lang === 'fr' ? 'block' : 'none';
+            });
+
+            // Update buttons
+            document.getElementById('btn-en').classList.toggle('active', lang === 'en');
+            document.getElementById('btn-fr').classList.toggle('active', lang === 'fr');
+
+            // Save preference
+            localStorage.setItem('notice_lang', lang);
+        }
+
+        // Load preference or default to EN
+        const savedLang = localStorage.getItem('notice_lang') || 'en';
+        setLang(savedLang);
+    </script>
+</body>
+
+</html>

@@ -72,6 +72,35 @@ public class Program
             // Pre-load config to check for settings
             var configService = new IniConfigService(null); // Logger is null initially
 
+            // EN: Log Rotation Logic (Max 2 files, 1.5MB)
+            // FR: Logique de rotation des logs (Max 2 fichiers, 1.5MB)
+            if (configService.LogToFile)
+            {
+                try 
+                {
+                    var logPath = configService.LogFilePath;
+                    if (File.Exists(logPath))
+                    {
+                        var info = new FileInfo(logPath);
+                        // 1.5 MB = 1.5 * 1024 * 1024 = 1,572,864 bytes
+                        if (info.Length > 1_572_864)
+                        {
+                            var oldPath = logPath + ".old";
+                            if (File.Exists(oldPath))
+                            {
+                                File.Delete(oldPath);
+                            }
+                            File.Move(logPath, oldPath);
+                            Console.WriteLine($"[INFO] Log file rotated: {logPath} -> {oldPath}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERROR] Failed to rotate log file: {ex.Message}");
+                }
+            }
+
             // Hide console window if MinimizeToTray is enabled
             if (configService.MinimizeToTray)
             {
@@ -119,8 +148,15 @@ public class Program
                     services.AddSingleton<RetroBatMarqueeManager.Infrastructure.Installation.ScriptInstallerService>(); // Auto-Install Scripts
                     services.AddSingleton<RetroBatMarqueeManager.Infrastructure.Installation.ScriptInstallerService>(); // Auto-Install Scripts
                     services.AddSingleton<RetroBatMarqueeManager.Infrastructure.Installation.AutoStartService>(); // Auto-Start Management
-                    services.AddSingleton<ScreenScraperService>(); // ScreenScraper API
+                    // Scrapers registration
+                    services.AddSingleton<ScreenScraperService>(); // Concrete for TrayIcon
+                    services.AddSingleton<IScraperService>(sp => sp.GetRequiredService<ScreenScraperService>()); // Interface map
                     
+                    services.AddSingleton<ArcadeItaliaScraperService>();
+                    services.AddSingleton<IScraperService>(sp => sp.GetRequiredService<ArcadeItaliaScraperService>());
+
+                    services.AddSingleton<IScraperManager, ScraperManager>();
+
                     // EN: RetroAchievements (API Client + Service) / FR: RetroAchievements (Client API + Service)
                     services.AddSingleton<RetroBatMarqueeManager.Infrastructure.Api.RetroAchievementsApiClient>(sp =>
                     {

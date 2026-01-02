@@ -7,6 +7,9 @@
     <UserSecretsId>dotnet-RetroBatMarqueeManager-d8a9514f-a3df-46f6-a788-ad0aa80d5d76</UserSecretsId>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>RetroBatMarqueeManager.App</AssemblyName>
+    <Version>1.0.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
