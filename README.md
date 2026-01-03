@@ -153,3 +153,13 @@ This project uses the following open-source tools and APIs:
 *   **ScreenScraper**: [https://www.screenscraper.fr](https://www.screenscraper.fr)
 *   **ArcadeItalia**: [http://adb.arcadeitalia.net](http://adb.arcadeitalia.net)
 *   **libmpv** (Shared Library for MPV): [https://sourceforge.net/projects/mpv-player-windows/files/libmpv/](https://sourceforge.net/projects/mpv-player-windows/files/libmpv/)
+
+## Zaccaria Pinball & Virtual DMD Setup
+
+For users of **Zaccaria Pinball**, it is possible to create a virtual secondary screen to serve as a DMD (Dot Matrix Display).
+
+1.  Download and install the [Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver).
+2.  Configure a virtual display with a resolution of **1920x1080**.
+3.  Set this virtual display as a secondary screen in Windows settings.
+4.  In Zaccaria Pinball, configure the DMD to display on this specific virtual screen.
+5.  **RetroBat Marquee Manager** can then mirror this screen if needed, or simply let Zaccaria manage the display directly.
