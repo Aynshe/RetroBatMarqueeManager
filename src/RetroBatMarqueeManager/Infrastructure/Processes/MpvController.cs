@@ -1,21 +1,31 @@
+
 using RetroBatMarqueeManager.Core.Interfaces;
-using System.IO.Pipes;
+using RetroBatMarqueeManager.Infrastructure.UI;
+using Microsoft.Extensions.Logging; 
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 
 namespace RetroBatMarqueeManager.Infrastructure.Processes
 {
-    public class MpvController
+    public class MpvController : IDisposable
     {
         private readonly IConfigService _config;
-        private readonly IProcessService _processService;
         private readonly ILogger<MpvController> _logger;
-        private const string PipeName = "mpv-pipe"; // Nom EXACT du Python : \\.\pipe\mpv-pipe
+        
+        private Thread? _uiThread;
+        private MarqueeForm? _form;
+        
+        private IntPtr _mpvHandle = IntPtr.Zero;
+        private bool _isInitialized = false;
 
+        // Overlay Ping-Pong state
+        private CancellationTokenSource? _overlayCts;
+        private int _currentOverlaySlot = 0; 
+        
         public MpvController(IConfigService config, IProcessService processService, ILogger<MpvController> logger)
         {
             _config = config;
-            _processService = processService;
             _logger = logger;
         }
 
@@ -23,547 +33,367 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
         {
             if (!_config.IsMpvEnabled)
             {
-                _logger.LogWarning("MPV is disabled in config (ScreenNumber=false). Skipping startup.");
+                _logger.LogWarning("MPV is disabled in config. Skipping startup.");
                 return;
             }
 
-            var pipeName = @"\\.\pipe\mpv-pipe";
-            var screenNumber = _config.GetSetting("ScreenNumber", "1");
-            var bgColor = _config.MarqueeBackgroundColor; // e.g. #000000
+            if (_isInitialized && _mpvHandle != IntPtr.Zero) return;
 
-            // 1. Custom Command Check
-            string customCmd = _config.MpvCustomCommand;
-            if (!string.IsNullOrEmpty(customCmd))
+            // Start UI Thread for the Window
+            _uiThread = new Thread(UiThreadEntry);
+            _uiThread.SetApartmentState(ApartmentState.STA); 
+            _uiThread.IsBackground = true;
+            _uiThread.Start();
+        }
+
+        private void UiThreadEntry()
+        {
+            try 
             {
-                _logger.LogInformation("Using Custom MPV Command from config.ini");
+                var screenNumberStr = _config.GetSetting("ScreenNumber", "1");
+                int.TryParse(screenNumberStr, out int screenNum);
                 
-                // Variable substitution
-                // Supported: {MPVPath}, {IPCChannel}, {ScreenNumber}, {DefaultImagePath}, {MarqueeBackgroundCodeColor}
-                
-                var finalCmd = customCmd
-                    .Replace("{MPVPath}", _config.MPVPath)
-                    .Replace("{IPCChannel}", pipeName)
-                    .Replace("{ScreenNumber}", screenNumber)
-                    .Replace("{DefaultImagePath}", _config.DefaultImagePath)
-                    .Replace("{DefaultImagePath}", _config.DefaultImagePath)
-                    .Replace("{MarqueeBackgroundCodeColor}", bgColor);
+                _form = new MarqueeForm(screenNum, _logger);
+                _form.Show(); 
 
-                // Auto-correct legacy/incorrect template: --background=#... -> --background-color=#...
-                if (finalCmd.Contains("--background=#"))
+                if (InitializeMpv(_form.RenderHandle))
                 {
-                    finalCmd = finalCmd.Replace("--background=#", "--background-color=#");
-                    _logger.LogWarning("Auto-corrected '--background' to '--background-color' in Custom MPV Command.");
-                }
-
-                // For robustness, if the user didn't quote MPVPath, we might want to ensure the first token is handled or just pass the whole thing
-                // StartProcessWithLogging(str, str) treats first arg as filename.
-                // We need to split filename (exe) and arguments.
-                
-                // Simple heuristic: The first quoted string or first space-delimited token is the EXE.
-                // But usually, the user might provide just arguments if they assume we launch MPV? 
-                // No, the requested feature implies full command line control including the exe path likely.
-                // But SystemProcessService requires (FileName, Arguments). 
-                
-                // Let's parse simple:
-                // If it starts with quote, find end quote. 
-                // Else find first space.
-                
-                string fileName = _config.MPVPath;
-                string arguments = finalCmd;
-
-                // If the user's string starts with the MPV path, we should try to extract it, OR 
-                // we can just run "cmd /c" ? No, that's messy.
-                // Let's assume the user puts the full command.
-                // We need to separate EXE from ARGS.
-                
-                // "C:\Path\mpv.exe" --arg1 ...
-                
-                var parts = SplitCommand(finalCmd);
-                if (parts.Count > 0)
-                {
-                    fileName = parts[0];
-                    // Re-join the rest or just substring? Substring is safer to preserve quote flavor if SplitCommand de-quotes.
-                    // Actually, if we use the same StartProcessWithLogging that takes (fileName, arguments string), it puts them in ProcessStartInfo.Arguments.
-                    // ProcessStartInfo.Arguments does NOT automatically quote the filename.
-                    
-                    // Better approach: Use the custom command as the ARGUMENTS to "cmd /c" ? 
-                    // No, invalid PID tracking.
-                    
-                // Unified Parsing Logic
-                // We must separate the executable (first token) from the arguments.
-                // Logic: If starts with quote, read until next quote. Else read until space.
-                
-                if (finalCmd.StartsWith("\""))
-                {
-                    // Find closing quote
-                    // Starting at index 1 to skip the first quote
-                    var endQuote = finalCmd.IndexOf('"', 1);
-                    if (endQuote != -1)
-                    {
-                        fileName = finalCmd.Substring(1, endQuote - 1);
-                        arguments = finalCmd.Substring(endQuote + 1).Trim();
-                    }
-                    else
-                    {
-                        // Mismatched quotes? Treat as single file/command (unlikely to work but safe fallback)
-                        fileName = finalCmd.Trim('"');
-                        arguments = "";
-                    }
+                    System.Windows.Forms.Application.Run(_form);
                 }
                 else
                 {
-                    var firstSpace = finalCmd.IndexOf(' ');
-                    if (firstSpace != -1)
-                    {
-                        fileName = finalCmd.Substring(0, firstSpace).Trim('"');
-                        arguments = finalCmd.Substring(firstSpace + 1).Trim();
-                    }
-                    else
-                    {
-                        fileName = finalCmd.Trim('"');
-                        arguments = "";
-                    }
-                }
-                }
-                
-                _logger.LogInformation($"Executing Custom MPV: {fileName} {arguments}");
-                try 
-                {
-                    _processService.StartProcessWithLogging(fileName, arguments, Path.GetDirectoryName(fileName));
-                     // Verification logic
-                    System.Threading.Thread.Sleep(2000);
-                    if (_processService.IsProcessRunning("mpv")) _logger.LogInformation("Custom MPV started successfully!");
-                    else _logger.LogError("Custom MPV failed to start or crashed immediately.");
-                }
-                catch(Exception ex) { _logger.LogError($"Custom MPV Error: {ex.Message}"); }
-                
-                return;
-            }
-
-            // 2. Default Logic
-            var args = new List<string>
-            {
-                _config.DefaultImagePath, // First arg is file to play
-                "--idle",
-                "--keep-open=yes",
-                "--loop-file=inf",
-                $"--input-ipc-server={pipeName}",
-                "--fs",
-                $"--screen={screenNumber}",
-                $"--fs-screen={screenNumber}",
-                $"--background-color={bgColor}",
-                "--osd-level=1", // Allow OSD
-                // "--no-osc", // REMOVED: We need OSC script loaded to toggle it
-                "--script-opts=osc-visibility=never,osc-layout=box,osc-seekbarstyle=bar", // Load OSC hidden
-                "--ontop",
-                "--vo=gpu", // Force standard GPU renderer (fix for black screen on older hardware/drivers)
-                "--mute=yes",
-                $"--scripts={Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "lua")}"
-            };
-            
-            _logger.LogInformation($"Starting MPV (Default): {_config.MPVPath} with args...");
-            
-            try
-            {
-                // Usage of ArgumentList overload
-                _processService.StartProcessWithLogging(_config.MPVPath, args, Path.GetDirectoryName(_config.MPVPath));
-                
-                System.Threading.Thread.Sleep(2000);
-                if (_processService.IsProcessRunning("mpv"))
-                {
-                    _logger.LogInformation("MPV started successfully!");
-                }
-                else
-                {
-                    _logger.LogError("MPV process not found after start - it may have crashed. Check stderr logs above.");
+                     _logger.LogWarning("[UI Thread] MPV Initialization failed. Form will not run.");
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Failed to start MPV: {ex.Message}");
+                _logger.LogError($"[UI Thread] Error: {ex.Message}");
+            }
+        }
+
+        private bool InitializeMpv(IntPtr windowHandle)
+        {
+            try
+            {
+                // Create LibMpv instance
+                _mpvHandle = LibMpvNative.mpv_create();
+                if (_mpvHandle == IntPtr.Zero) throw new Exception("mpv_create failed");
+
+                // Set Options BEFORE Init (Critical for 'wid')
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "wid", windowHandle.ToInt64().ToString()));
+                
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "idle", "yes"));
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "keep-open", "yes"));
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "vo", "gpu"));
+                // HWDec auto can cause issues on some systems/drivers with embedded mpv (black screen)
+                // CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "hwdec", "auto"));
+                
+                // Scripts
+                var scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "lua");
+                if (Directory.Exists(scriptPath))
+                {
+                     CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "scripts", scriptPath));
+                }
+
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "osd-level", "1"));
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "script-opts", "osc-visibility=never,osc-layout=box,osc-seekbarstyle=bar"));
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "mute", "yes"));
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "loop-file", "inf"));
+
+                // Initialize
+                CheckError(LibMpvNative.mpv_initialize(_mpvHandle));
+                
+                _isInitialized = true;
+                _isInitialized = true;
+                _logger.LogInformation("LibMpv initialized successfully (Native P/Invoke).");
+                _logger.LogInformation($"[LibMpvResolver] \n{LibMpvResolver.ResolutionLog}");
+
+                // Load Default Image if exists
+                if (!string.IsNullOrEmpty(_config.DefaultImagePath) && File.Exists(_config.DefaultImagePath))
+                {
+                    _logger.LogInformation($"Loading default image: {_config.DefaultImagePath}");
+                    // Need to use command because DisplayImage is async/Task based and we are in void
+                    var safePath = _config.DefaultImagePath.Replace("\\", "/");
+                    LibMpvNative.Command(_mpvHandle, new[] { "loadfile", safePath, "replace" });
+                }
+                
+                return true;
+            }
+            catch (Exception ex)
+            {
+                var extraMsg = "";
+                if (ex.Message.Contains("0x8007045A") || ex.Message.Contains("Unable to load DLL"))
+                {
+                    extraMsg = " -> POSSIBLE CAUSE: Missing Visual C++ Redistributable 2015-2022. Please install it.";
+                }
+
+                _logger.LogError($"Failed to initialize LibMpv: {ex.Message}. Ensure libmpv-2.dll is present.{extraMsg}");
+                if (_form != null && !_form.IsDisposed)
+                {
+                    _form.Invoke(() => _form.Close());
+                }
+                return false;
             }
         }
         
-        private List<string> SplitCommand(string cmd)
+        private void CheckError(int status)
         {
-            // Basic splitter for fallback
-            var list = new List<string>();
-            if (string.IsNullOrWhiteSpace(cmd)) return list;
-            // Native win32 split might be better but let's stick to safe managed for now if needed.
-            // Actually redundant if we used the logic above.
-            return list; 
+            if (status < 0)
+            {
+                // Simple error check
+                _logger.LogWarning($"LibMpv Error: {status}");
+            }
         }
+
+        // --- Commands ---
 
         public async Task SendCommandAsync(string command, bool retry = true)
         {
-            if (!_config.IsMpvEnabled) return;
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return;
 
             try 
             {
-                using var client = new NamedPipeClientStream(".", "mpv-pipe", PipeDirection.Out);
-                await client.ConnectAsync(500);
-                using var writer = new StreamWriter(client);
-                await writer.WriteLineAsync(command);
-                await writer.FlushAsync();
+                // Parse legacy JSON commands
+                if (string.IsNullOrWhiteSpace(command)) return;
+
+                using var doc = JsonDocument.Parse(command);
+                if (doc.RootElement.TryGetProperty("command", out var cmdElement) && cmdElement.ValueKind == JsonValueKind.Array)
+                {
+                     var args = cmdElement.EnumerateArray().Select(e => e.ToString()).ToArray();
+                     ExecuteCommand(args);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"Failed to send MPV command: {ex.Message}");
-                
-                if (retry)
-                {
-                    _logger.LogInformation("Attempting to restart MPV and retry command...");
-                    // Force restart
-                    StartMpv();
-                    
-                    // Small delay to let MPV initialize pipe
-                    await Task.Delay(2000);
-                    
-                    // Retry once (retry=false)
-                    await SendCommandAsync(command, retry: false);
-                }
-                else
-                {
-                    _logger.LogError("MPV Auto-Restart failed or command failed twice.");
-                }
+                _logger.LogWarning($"[MPV] Failed to parse/execute legacy command: {ex.Message}");
             }
+            
+            await Task.CompletedTask;
+        }
+        
+        private void ExecuteCommand(string[] args)
+        {
+             if (_mpvHandle == IntPtr.Zero) return;
+             
+             CheckError(LibMpvNative.Command(_mpvHandle, args));
         }
 
-        public async Task PushRetroAchievementData(string type, params object[] values)
+        public void Stop()
         {
-            if (!_config.IsMpvEnabled) return;
-
-            try 
+            if (_isInitialized && _mpvHandle != IntPtr.Zero)
             {
-                // Format: type|val1|val2|...
-                var validValues = values.Select(v => v?.ToString() ?? "").ToList();
-                var pipedData = string.Join("|", new[] { type }.Concat(validValues));
-                
-                // Escape for JSON string
-                // Note: The Python script sends: echo {"command":["script-message","push-ra","{data}"]}>{IPCChannel}
-                // We need to construct this JSON command.
-                
-                // Serialize the command array manually or via Newtonsoft/System.Text.Json
-                // Using simple string construction to avoid dependency just for this if strict JSON not needed, 
-                // BUT "script-message" might need quotes escaping inside the data string?
-                // The data string itself is a single string argument.
-                
-                // Check for custom command in config
-                // Template: echo {"command":["script-message","push-ra","{data}"]}>{IPCChannel}
-                var customCmd = _config.GetSetting("MPVPushRetroAchievementsDatas", "");
-                var pipeName = @"\\.\pipe\mpv-pipe";
-
-                if (!string.IsNullOrWhiteSpace(customCmd))
-                {
-                    // Use Custom Shell Command Logic
-                    var finalCmd = customCmd
-                        .Replace("{data}", pipedData) // PipedData contains user|token|etc
-                        .Replace("{IPCChannel}", pipeName);
-
-                    _logger.LogInformation($"Executing Custom RA Push: {finalCmd}");
-                    
-                    // Executes via CMD because it likely contains redirection >
-                    _processService.StartProcessWithLogging("cmd.exe", $"/c {finalCmd}", AppDomain.CurrentDomain.BaseDirectory);
-                }
-                else
-                {
-                    // Fallback: Internal logic (Direct Pipe Write)
-                    var jsonCommand = System.Text.Json.JsonSerializer.Serialize(new 
-                    { 
-                        command = new[] { "script-message", "push-ra", pipedData } 
-                    });
-                    
-                    // Send as JSON object (standard MPV IPC)
-                    await SendCommandAsync(jsonCommand);
-                    _logger.LogInformation($"Pushed RA Data (Internal): {type} ({values.Length} items)");
-                }
+                LibMpvNative.Command(_mpvHandle, new[] { "stop" });
+                // Also clear playlist to be sure
+                LibMpvNative.Command(_mpvHandle, new[] { "playlist-clear" });
             }
-            catch (Exception ex)
+
+            if (_form != null && !_form.IsDisposed)
             {
-                _logger.LogError($"Failed to push RA data: {ex.Message}");
+                // EN: Hide the form to allow underlying windows (like dmdext) to be seen
+                // FR: Cacher le formulaire pour permettre aux fenêtres sous-jacentes d'être vues
+                try 
+                {
+                    _form.Invoke(() => _form.Hide()); 
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"[MpvController] Error hiding form: {ex.Message}");
+                }
             }
         }
 
         public async Task DisplayImage(string imagePath, bool loop = true)
         {
-            // Escape backslashes for MPV (Just for safety, though JSON Serialize handles it too)
-            var safePath = imagePath.Replace("\\", "/");
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return;
             
-            // EN: Set loop first, then load with append-play to ensure playback starts
-            // FR: Définir loop d'abord, puis charger avec append-play pour garantir la lecture
-            
-            // 1. Set loop property before loading
-            var loopValue = loop ? "inf" : "no";
-            var loopCmd = System.Text.Json.JsonSerializer.Serialize(new 
-            { 
-                command = new[] { "set_property", "loop-file", loopValue } 
-            });
-            await SendCommandAsync(loopCmd);
-            
-            // 2. Load file with "replace" mode and force start playing
-            var loadCmd = System.Text.Json.JsonSerializer.Serialize(new 
-            { 
-                command = new[] { "loadfile", safePath, "replace" } 
-            });
-            await SendCommandAsync(loadCmd);
-            
-            // 3. Small delay to let MPV start loading - REMOVED for speed
-            // await Task.Delay(50);
-            
-            // 4. Force unpause
-            var unpauseCmd = System.Text.Json.JsonSerializer.Serialize(new 
-            { 
-                command = new[] { "set_property", "pause", "no" } 
-            });
-            await SendCommandAsync(unpauseCmd);
-        }
-
-        public async Task<string?> GetPropertyAsync(string propertyName)
-        {
-            if (!_config.IsMpvEnabled) return null;
-
-            int retries = 3;
-            while (retries > 0)
+            try
             {
-                retries--;
-                try
+                // EN: Ensure form is visible (in case it was stopped/hidden)
+                // FR: S'assurer que le formulaire est visible
+                if (_form != null && !_form.IsDisposed)
                 {
-                    // Generate a unique request ID
-                    int requestId = new Random().Next(1, 10000);
-                    
-                    var jsonCommand = System.Text.Json.JsonSerializer.Serialize(new
+                    _form.Invoke(() => 
                     {
-                        command = new[] { "get_property", propertyName },
-                        request_id = requestId 
+                        if (!_form.Visible) _form.Show();
                     });
-
-                    // Use PipeOptions.Asynchronous for true async support
-                    using var client = new NamedPipeClientStream(".", "mpv-pipe", PipeDirection.InOut, PipeOptions.Asynchronous);
-                    
-                    _logger.LogInformation($"[IPC] Connecting... (Retry {2-retries})");
-                    await client.ConnectAsync(500);
-
-                    if (!client.IsConnected)
-                    {
-                        _logger.LogWarning($"[IPC] Failed to connect (IsConnected=false) - {propertyName}");
-                        await Task.Delay(100);
-                        continue;
-                    }
-
-                    try 
-                    {
-                        // Using explicit logging and try/catch for stream creation
-                        using var writer = new StreamWriter(client, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
-                        using var reader = new StreamReader(client, Encoding.UTF8, false, 1024, leaveOpen: true);
-
-                        _logger.LogInformation($"[IPC] Sending: {jsonCommand}");
-                        await writer.WriteLineAsync(jsonCommand);
-                        
-                        var timeoutTask = Task.Delay(1000);
-                        
-                        while (client.IsConnected)
-                        {
-                           var lineTask = reader.ReadLineAsync();
-                           var completed = await Task.WhenAny(lineTask, timeoutTask);
-                           if (completed == timeoutTask) 
-                           {
-                               _logger.LogWarning($"[IPC] Timeout waiting for {propertyName} (req_id: {requestId})");
-                               break; // Retry
-                           }
-
-                           var line = await lineTask;
-                           if (line == null) break; // End of stream
-                           if (string.IsNullOrEmpty(line)) continue;
-                           
-                           // _logger.LogInformation($"[IPC] Recv: {line}");
-
-                           if (line.Contains("\"request_id\"") || line.Contains("\"data\""))
-                           {
-                                using var doc = JsonDocument.Parse(line);
-                                var root = doc.RootElement;
-                                
-                                if (root.TryGetProperty("request_id", out var resIdParam))
-                                {
-                                    if (resIdParam.GetInt32() != requestId) continue;
-                                }
-                                
-                                if (root.TryGetProperty("error", out var errorElement))
-                                {
-                                    var err = errorElement.GetString();
-                                    if (err != "success")
-                                    {
-                                        _logger.LogWarning($"[IPC] MPV Error for {propertyName}: {err}");
-                                        return null; 
-                                    }
-                                }
-
-                                if (root.TryGetProperty("data", out var dataElement))
-                                {
-                                    return dataElement.ToString();
-                                }
-                           }
-                        }
-                    }
-                    catch (Exception innerEx)
-                    {
-                         _logger.LogWarning($"[IPC] Inner Exception during RW: {innerEx.Message}");
-                         throw; // Rethrow to outer retry logic
-                    }
                 }
-                catch (TimeoutException)
-                {
-                    _logger.LogWarning($"[IPC] Connection Timeout for {propertyName}");
-                }
-                catch (IOException ioEx)
-                {
-                     // Pipe broken or not found
-                     _logger.LogWarning($"[IPC] IO Error for {propertyName}: {ioEx.Message}");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning($"[IPC] Unexpected Error for {propertyName} (Try {2-retries}): {ex.Message}");
-                }
+
+                var safePath = imagePath.Replace("\\", "/");
+                CheckError(LibMpvNative.mpv_set_property_string(_mpvHandle, "loop-file", loop ? "inf" : "no"));
                 
-                await Task.Delay(100); // Wait before retry
-            }
-            
-            _logger.LogError($"[IPC] Failed to get property {propertyName} after retries");
-            return null;
-        }
+                _logger.LogInformation($"[MPV] DisplayImage: Loading '{safePath}'");
+                int res = LibMpvNative.Command(_mpvHandle, new[] { "loadfile", safePath, "replace" });
+                CheckError(res);
+                _logger.LogInformation($"[MPV] DisplayImage: LoadFile result = {res}");
 
-        public async Task<double> GetCurrentTime()
-        {
-            var result = await GetPropertyAsync("time-pos");
-            if (double.TryParse(result, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var time))
+                CheckError(LibMpvNative.mpv_set_property_string(_mpvHandle, "pause", "no"));
+            }
+            catch (Exception ex)
             {
-                return time;
+                _logger.LogError($"[MPV] Error DisplayImage: {ex.Message}");
             }
-            return 0.0;
+            await Task.CompletedTask;
         }
 
-        private CancellationTokenSource? _overlayCts;
-
-        private int _currentOverlaySlot = 0; // 0 for none, 1 for slot 1, 2 for slot 2
-
-        public async Task ShowOverlay(string imagePath, int durationMs, string position = "top-right")
+        public async Task PushRetroAchievementData(string type, params object[] values)
         {
-            if (!_config.IsMpvEnabled) return;
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return;
+
+            try 
+            {
+                var validValues = values.Select(v => v?.ToString() ?? "").ToList();
+                var pipedData = string.Join("|", new[] { type }.Concat(validValues));
+                
+                ExecuteCommand(new[] { "script-message", "push-ra", pipedData });
+                _logger.LogInformation($"Pushed RA Data: {type}");
+            }
+            catch (Exception ex)
+            {
+                 _logger.LogError($"[MPV] Error Push RA: {ex.Message}");
+            }
+            await Task.CompletedTask;
+        }
+
+        public Task<string?> GetPropertyAsync(string propertyName)
+        {
+             if (!_isInitialized || _mpvHandle == IntPtr.Zero) return Task.FromResult<string?>(null);
+             try
+             {
+                 return Task.FromResult(LibMpvNative.GetPropertyString(_mpvHandle, propertyName));
+             }
+             catch
+             {
+                 return Task.FromResult<string?>(null);
+             }
+        }
+
+        public Task<double> GetCurrentTime()
+        {
+             if (!_isInitialized || _mpvHandle == IntPtr.Zero) return Task.FromResult(0.0);
+             try
+             {
+                 var valStr = LibMpvNative.GetPropertyString(_mpvHandle, "time-pos");
+                 if (!string.IsNullOrEmpty(valStr) && double.TryParse(valStr, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double d))
+                 {
+                     return Task.FromResult(d);
+                 }
+                 return Task.FromResult(0.0);
+             }
+             catch
+             {
+                 return Task.FromResult(0.0);
+             }
+        }
+
+        // --- Overlay Logic (Identical Logic, New Implementation) ---
+
+        public Task ShowOverlay(string imagePath, int durationMs, string position = "top-right")
+        {
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return Task.CompletedTask;
 
             try
             {
-                // EN: Cancel previous overlay timer (do not dispose, just cancel)
-                // FR: Annuler timer précédent
                 _overlayCts?.Cancel();
                 _overlayCts = new CancellationTokenSource();
 
-                // EN: Ping-Pong Logic: Use alternate slot to prevent frame gap (which causes scaling jump)
-                // FR: Logique Ping-Pong: Utiliser slot alterné pour éviter saut de frame (et saut de scaling)
-                // If Slot 1 is active, use Slot 2, then remove Slot 1. And vice-versa.
                 int nextSlot = (_currentOverlaySlot == 1) ? 2 : 1;
                 string currentLabel = $"@ra_overlay_{_currentOverlaySlot}";
                 string nextLabel = $"@ra_overlay_{nextSlot}";
                 
                 var safePath = imagePath.Replace("\\", "/"); 
                 
-                // Position logic
                 string overlayPosition;
                 if (position == "bottom-left") overlayPosition = "0:main_h-overlay_h";
                 else if (position == "top-left") overlayPosition = "0:0";
-                else overlayPosition = "main_w-overlay_w-20:20";
+                else overlayPosition = "main_w-overlay_w-20:20"; // top-right with margin
                 
                 int w = _config.MarqueeWidth;
                 int h = _config.MarqueeHeight;
                 
-                // Filter Graph: Identical logic but with unique label
+                // Filter Graph
+                // Note: Restoring [in] and [out] pads and using escaped quotes as per reference implementation.
                 var filterGraph = $"[in]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}:(iw-ow)/2:(ih-oh)/2[bg];movie=\\'{safePath}\\'[logo];[bg][logo]overlay={overlayPosition}[out]";
                 
-                var jsonCmd = System.Text.Json.JsonSerializer.Serialize(new 
-                { 
-                    command = new[] { "vf", "add", $"{nextLabel}:lavfi=[{filterGraph}]" } 
-                });
-
-                // 1. Add NEW overlay (on top of old one if exists)
-                await SendCommandAsync(jsonCmd);
+                // 1. Add NEW overlay
+                // Restore outer [] as they are part of lavfi-bridge syntax for mpv
+                var commandArg = $"{nextLabel}:lavfi=[{filterGraph}]";
+                _logger.LogInformation($"[MpvController] Applying Overlay: {commandArg}");
                 
-                // 2. Remove OLD overlay if it existed (and wasn't 0)
+                CheckError(LibMpvNative.Command(_mpvHandle, new[] { "vf", "add", commandArg }));
+                
+                // 2. Remove OLD overlay
                 if (_currentOverlaySlot != 0)
                 {
-                    var removeCmd = System.Text.Json.JsonSerializer.Serialize(new 
-                    { 
-                        command = new[] { "vf", "remove", currentLabel } 
-                    });
-                    // Fire and forget remove to speed up? No, safe async
-                    await SendCommandAsync(removeCmd);
+                    ExecuteCommand(new[] { "vf", "remove", currentLabel });
                 }
                 
-                // Update state
                 _currentOverlaySlot = nextSlot;
+                _logger.LogInformation($"[MPV] Swapped to Overlay Slot {nextSlot}");
 
-                _logger.LogInformation($"[MPV] Swapped to Overlay Slot {nextSlot}: {imagePath}");
-
-                // EN: Auto-remove after duration
+                // Timer to remove
                 var token = _overlayCts.Token;
                 _ = Task.Delay(durationMs, token).ContinueWith(async t => 
                 {
                     if (t.IsCanceled) return;
-                    await RemoveOverlay(false); 
+                    await RemoveOverlay(false); // don't cancel this timer as we are inside it
                 }, TaskScheduler.Default);
             }
             catch (Exception ex)
             {
                 _logger.LogError($"[MPV] Error showing overlay: {ex.Message}");
             }
+            return Task.CompletedTask;
         }
-
-        public async Task ShowAchievementNotification(string cupPath, string finalOverlayPath, int cupDuration = 2000, int finalDuration = 8000)
-        {
-             // Sequence: Cup -> Final
-             // EN: Use Ping-Pong logic implicitly. Do NOT remove overlays explicitly to avoid scaling jumps.
-             // FR: Utiliser la logique Ping-Pong implicitement. NE PAS supprimer explicitement les overlays pour éviter les sauts de scaling.
-             
+        
+         public async Task ShowAchievementNotification(string cupPath, string finalOverlayPath, int cupDuration = 2000, int finalDuration = 8000)
+         {
              // 1. Show Cup
              if (!string.IsNullOrEmpty(cupPath) && File.Exists(cupPath))
              {
-                 // EN: Duration slightly longer than wait time to ensure overlap
                  await ShowOverlay(cupPath, cupDuration + 500); 
                  await Task.Delay(cupDuration);
              }
              
-             // 2. Show Final (Badge + Text)
+             // 2. Show Final
              if (!string.IsNullOrEmpty(finalOverlayPath) && File.Exists(finalOverlayPath))
              {
-                 // EN: Use "top-left" (0:0) because the overlay is generated as a full-screen canvas
-                 // EN: Duration slightly longer than wait time to ensure overlap with next cycle start
                  await ShowOverlay(finalOverlayPath, finalDuration + 2000, "top-left");
                  await Task.Delay(finalDuration); 
              }
-        }
+         }
 
-        public async Task RemoveOverlay(bool cancelTimer = true)
+        public Task RemoveOverlay(bool cancelTimer = true)
         {
-             if (!_config.IsMpvEnabled) return;
+             if (!_isInitialized || _mpvHandle == IntPtr.Zero) return Task.CompletedTask;
              try
              {
                 if (cancelTimer) _overlayCts?.Cancel();
 
-                // EN: Remove CURRENT slot
                 if (_currentOverlaySlot != 0)
                 {
                     var label = $"@ra_overlay_{_currentOverlaySlot}";
-                    var jsonCmd = System.Text.Json.JsonSerializer.Serialize(new 
-                    { 
-                        command = new[] { "vf", "remove", label } 
-                    });
-                    await SendCommandAsync(jsonCmd);
-                    _currentOverlaySlot = 0; // Reset
+                    ExecuteCommand(new[] { "vf", "remove", label });
+                    _currentOverlaySlot = 0; 
                 }
-                
-                // Safety: Try removing the other one too just in case state got desync
-                // (Optional, maybe overkill but safe)
-                // await SendCommandAsync(... "remove", "@ra_overlay_1" ... );
-                // await SendCommandAsync(... "remove", "@ra_overlay_2" ... );
              }
              catch { }
+             return Task.CompletedTask;
+        }
+
+        public void Dispose()
+        {
+             if (_mpvHandle != IntPtr.Zero)
+             {
+                 // Terminate
+                 LibMpvNative.mpv_terminate_destroy(_mpvHandle);
+                 _mpvHandle = IntPtr.Zero;
+             }
+             
+             if (_form != null && !_form.IsDisposed)
+             {
+                 if (_form.InvokeRequired) _form.Invoke(() => _form.Close());
+                 else _form.Close();
+             }
         }
     }
 }

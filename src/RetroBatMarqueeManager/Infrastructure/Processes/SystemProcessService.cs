@@ -274,5 +274,45 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                  _logger.LogWarning($"KillProcess error for {processName}: {ex.Message}");
             }
         }
+
+        // Feature: Refocus Game Window
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        private const int SW_RESTORE = 9;
+
+        public bool FocusProcess(string processName)
+        {
+            if (!OperatingSystem.IsWindows()) return false;
+            
+            try
+            {
+                // Handle extension if provided
+                if (processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    processName = Path.GetFileNameWithoutExtension(processName);
+
+                var processes = Process.GetProcessesByName(processName);
+                if (processes.Any())
+                {
+                    var p = processes.First();
+                    if (p.MainWindowHandle != IntPtr.Zero)
+                    {
+                        // Restore if minimized
+                        ShowWindow(p.MainWindowHandle, SW_RESTORE);
+                        // Bring to front
+                        bool result = SetForegroundWindow(p.MainWindowHandle);
+                        _logger.LogInformation($"Refocusing process '{processName}' (PID:{p.Id}) success: {result}");
+                        return result;
+                    }
+                }
+            }
+            catch(Exception ex) 
+            {
+                _logger.LogError($"Error focusing process {processName}: {ex.Message}");
+            }
+            return false;
+        }
     }
 }

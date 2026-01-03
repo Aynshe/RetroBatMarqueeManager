@@ -26,6 +26,14 @@
       <Link>systems.scrap</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <Content Include="..\..\tools\mpv-dev-x86_64-20251228-git-a58dd8a\libmpv-2.dll">
+      <Link>libmpv\v2\libmpv-2.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\tools\mpv-dev-x86_64-v3-20251228-git-a58dd8a\libmpv-2.dll">
+      <Link>libmpv\v3\libmpv-2.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- Copier les ressources après le build -->

@@ -979,6 +979,10 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     }
 
                     // Resume DMD for game or system
+                     // EN: Wait for external DMD control (e.g. Pinball FX3) to release before attempting to display
+                     // FR: Attendre la libération du contrôle DMD externe (ex: Pinball FX3) avant d'essayer d'afficher
+                     await _dmdService.WaitForExternalReleaseAsync();
+                     
                      // Display DMD Game Over if found
                      var dmdGameOver = _marqueeFinder.FindDmdGameOverMarquee();
                      if (dmdGameOver != null)
@@ -1119,6 +1123,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private async Task DisplayDmdSystemAsync(string systemName)
         {
              var systemDmd = await _marqueeFinder.FindDmdImageAsync(systemName, systemName, "");
+             
+             if (_gameRunning) return; // Prevent overwriting if game started during lookup
+
              if (systemDmd != null)
              {
                  await _dmdService.PlayAsync(systemDmd, systemName, systemName);
@@ -1133,6 +1140,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private async Task DisplayMpvSystemAsync(string systemName)
         {
              var marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("system-selected", systemName, "", "", "");
+             
+             if (_gameRunning) return; // Prevent overwriting if game started during lookup
+
              if (marqueeFile != null)
              {
                  await _mpv.DisplayImage(marqueeFile);
@@ -1192,7 +1202,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
             if (suspendMPV)
             {
                 _logger.LogInformation($"[Pinball] Suspending MPV for '{system}'.");
-                _processService.KillProcess("mpv");
+                // EN: Stop internal MPV player and hide window
+                // FR: Arrêter le lecteur MPV interne et cacher la fenêtre
+                _mpv.Stop();
                 _mpvSuspendedForPinball = true;
             }
 
@@ -1362,15 +1374,25 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
             // EN: Parallel Execution for DMD and MPV
             // FR: Exécution parallèle pour DMD et MPV
-            var dmdTask = Task.Run(async () => await DisplayDmdGameAsync(system, gameName, romFileName, romPath));
-            var mpvTask = Task.Run(async () => await DisplayMpvGameAsync(system, gameName, romFileName, romPath));
+            var dmdTask = Task.Run(async () => await DisplayDmdGameAsync(system, gameName, romFileName, romPath, token));
+            var mpvTask = Task.Run(async () => await DisplayMpvGameAsync(system, gameName, romFileName, romPath, token));
 
             await Task.WhenAll(dmdTask, mpvTask);
         }
 
-        private async Task DisplayDmdGameAsync(string system, string gameName, string romFileName, string romPath)
+        private async Task DisplayDmdGameAsync(string system, string gameName, string romFileName, string romPath, CancellationToken token)
         {
+             if (token.IsCancellationRequested) return;
              var dmdFile = await _marqueeFinder.FindDmdImageAsync(system, gameName, romFileName, romPath, allowVideo: false);
+             
+             if (token.IsCancellationRequested) return;
+             
+             // CRITICAL: Check if game started while we were looking for media (Race Condition Fix)
+             if (_gameRunning)
+             {
+                 _logger.LogWarning($"[DMD Race Check] Aborting game-selected display for '{gameName}'. Game is already running.");
+                 return;
+             }
              
              if (!string.IsNullOrEmpty(dmdFile))
              {
@@ -1392,9 +1414,19 @@ namespace RetroBatMarqueeManager.Application.Workflows
              }
         }
 
-        private async Task DisplayMpvGameAsync(string system, string gameName, string romFileName, string romPath)
+        private async Task DisplayMpvGameAsync(string system, string gameName, string romFileName, string romPath, CancellationToken token)
         {
+             if (token.IsCancellationRequested) return;
              var marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("game-selected", system, gameName, gameName, romPath);
+
+             if (token.IsCancellationRequested) return;
+
+             // FIX: Prevent overwriting MPV if game has already started (and potentially suspended MPV)
+             if (_gameRunning)
+             {
+                 _logger.LogWarning($"[MPV Race Check] Aborting game-selected display for '{gameName}'. Game is already running.");
+                 return;
+             }
 
              if (marqueeFile != null)
              {

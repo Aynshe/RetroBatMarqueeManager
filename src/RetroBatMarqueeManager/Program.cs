@@ -28,8 +28,16 @@ public class Program
     private static IHost? _host;
     private static TrayIconService? _trayService;
 
+    [STAThread]
     public static async Task Main(string[] args)
     {
+        // Register Dynamic DLL Resolver for MPV (v2 vs v3)
+        LibMpvResolver.Register();
+
+        // Set High DPI Mode for UI elements (if any)
+        // This requires a reference to System.Windows.Forms
+        // Application.SetHighDpiMode(HighDpiMode.SystemAware); // Uncomment if System.Windows.Forms is used and needed
+
         const string PipeName = "RetroBatMarqueeManagerPipe";
 
         // --- CLIENT MODE (Send IPC Command) ---

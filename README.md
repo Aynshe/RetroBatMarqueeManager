@@ -152,3 +152,4 @@ This project uses the following open-source tools and APIs:
 *   **libzedmd** (Real DMD Support): [https://github.com/PPUC/libzedmd](https://github.com/PPUC/libzedmd)
 *   **ScreenScraper**: [https://www.screenscraper.fr](https://www.screenscraper.fr)
 *   **ArcadeItalia**: [http://adb.arcadeitalia.net](http://adb.arcadeitalia.net)
+*   **libmpv** (Shared Library for MPV): [https://sourceforge.net/projects/mpv-player-windows/files/libmpv/](https://sourceforge.net/projects/mpv-player-windows/files/libmpv/)

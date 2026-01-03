@@ -20,6 +20,7 @@ namespace RetroBatMarqueeManager.Application.Services
         private bool _isNativeOpen = false;
         private string? _lastMediaPath = null;
         private CancellationTokenSource? _animationCts = null;
+        private bool _isExternalControlActive = false;
 
         public DmdService(
             IConfigService config, 
@@ -57,7 +58,9 @@ namespace RetroBatMarqueeManager.Application.Services
                  if (_dmdWrapper.Load(dmdDir))
                  {
                      _logger.LogInformation("Native DMD Driver Loaded.");
-                     EnsureNativeOpen();
+                     _logger.LogInformation("Native DMD Driver Loaded.");
+                     _isExternalControlActive = false;
+                     await EnsureNativeOpenAsync();
                  }
                  else
                  {
@@ -214,7 +217,7 @@ namespace RetroBatMarqueeManager.Application.Services
             return _dmdDeviceIniPath;
         }
 
-        private void EnsureNativeOpen()
+        private async Task EnsureNativeOpenAsync()
         {
             if (!_dmdWrapper.IsLoaded) return;
 
@@ -223,14 +226,28 @@ namespace RetroBatMarqueeManager.Application.Services
 
             if (!_isNativeOpen)
             {
+                 // EN: Add safety delay to ensure USB device is fully released by external process (dmdext)
+                 // FR: Ajouter un délai de sécurité pour s'assurer que le périphérique USB est libéré par le processus externe
+                 await Task.Delay(200);
+
                 int result = _dmdWrapper.Open();
-                if (result >= 0) // usually 0 or count on success? 
+                if (result >= 0) // usually 0 or count on success 
                 {
                     _isNativeOpen = true;
                     _logger.LogInformation("Native DMD Device Opened.");
-                    
-                    // NOTE: Upscaling logic removed - we now map "virtual" -> "virtualdmd" section
-                    // which provides proper dot-matrix rendering without needing upscaling
+
+                    // EN: Send a CLEAR frame immediately to reset hardware state (Fix for ZeDMD screen frozen/black)
+                    // FR: Envoyer une frame CLEAR immédiatement pour réinitialiser l'état du matériel
+                    try 
+                    {
+                        var clearBytes = new byte[_config.DmdWidth * _config.DmdHeight * 3]; // Black (Zeros)
+                        _dmdWrapper.Render((ushort)_config.DmdWidth, (ushort)_config.DmdHeight, clearBytes);
+                        _logger.LogInformation("[DMD] Sent Clear Frame on Open.");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning($"[DMD] Failed to send Clear Frame: {ex.Message}");
+                    }
                 }
                 else
                 {
@@ -286,6 +303,15 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 return;
             }
+
+            // EN: Protection against overriding external processes (e.g., Pinball)
+            // FR: Protection contre l'écrasement de processus externes (ex: Pinball)
+            if (_isExternalControlActive)
+            {
+                _logger.LogWarning($"[DMD Protected] Leaving DMD alone because external control is active. Request for '{Path.GetFileName(mediaPath)}' ignored.");
+                return;
+            }
+
             _lastMediaPath = mediaPath;
 
             // Fix: Clean state for new playback
@@ -338,7 +364,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 if (!isVideo)
                 {
                     // NATIVE STATIC PATH
-                    EnsureNativeOpen();
+                    await EnsureNativeOpenAsync();
                     try 
                     {
                         var bytes = await _imageService.GetRawDmdBytes(mediaPath, _config.DmdWidth, _config.DmdHeight, useGrayscale);
@@ -385,6 +411,8 @@ namespace RetroBatMarqueeManager.Application.Services
                 _logger.LogInformation($"[Pinball] External handling requested for '{system}'. Internal DMD stopped. SuspendMPV: {suspendMPV}");
                 // stop internal DMD
                 Stop();
+                _isExternalControlActive = true;
+                _logger.LogInformation("[DMD Protected] External control activated.");
                 return (true, suspendMPV);
             }
 
@@ -403,8 +431,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 else
                 {
                     _logger.LogWarning($"[Pinball] Could not find position for '{gameName}' in Zaccaria positions.txt. Aborting.");
-                    return (true, suspendMPV); // Return true to prevent standard marquee execution even if failed? Or fallback? 
-                                 // Usually invalid command fails, so we return true to say "we attempted to handle it"
+                    return (true, suspendMPV); 
                 }
             }
 
@@ -413,37 +440,64 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 _logger.LogInformation($"[Pinball] Launching Custom Command: {actualCommand}");
                 
-                // We split the command into FileName and Arguments for ProcessStartInfo
-                // naive split might fail on quoted paths, but typically dmdext is first token
                 var cmdParts = actualCommand.Split(" ", 2);
                 var fileName = cmdParts[0];
                 var args = cmdParts.Length > 1 ? cmdParts[1] : "";
 
-                // If fileName is dmdext.exe, resolve full path if needed or rely on Path
                 if (fileName.Equals("dmdext.exe", StringComparison.OrdinalIgnoreCase))
                 {
                     fileName = _config.DmdExePath;
+                    
+                    // EN: Special fix for Zaccaria Pinball: Ensure --quit-when-done is present if not already
+                    // FR: Fix spécial pour Zaccaria Pinball : S'assurer que --quit-when-done est présent
+                    if (system.Contains("zaccaria", StringComparison.OrdinalIgnoreCase) && 
+                        !args.Contains("--quit-when-done", StringComparison.OrdinalIgnoreCase))
+                    {
+                         args += " --quit-when-done";
+                         _logger.LogInformation("[Pinball] Automatically added --quit-when-done for Zaccaria Pinball.");
+                    }
                 }
 
                 // EN: Close native driver to release DMD device for CLI process
                 // FR: Fermer le driver natif pour libérer le périphérique DMD pour le processus CLI
-                // CRITICAL: ZeDMD/Pin2DMD can only be used by one process at a time
+                StopAnimation(); // Ensure internal animation is stopped
                 EnsureNativeClosed();
                 
                 // EN: Wait for ZeDMD full restart (takes 1-2 seconds for hardware reset)
                 // FR: Attendre le redémarrage complet du ZeDMD (1-2 secondes pour reset matériel)
-                _logger.LogInformation("[Pinball] Waiting 2s for ZeDMD restart...");
-                System.Threading.Thread.Sleep(2000);
+                // _logger.LogInformation("[Pinball] Waiting 2s for ZeDMD restart...");
+                // await Task.Delay(2000); // Optimized: User confirmed delay might not be needed.
+                await Task.Delay(100); // Small safety buffer only
                 
                 _logger.LogInformation("[Pinball] Launching CLI command...");
-
-                StartCliProcessCustom(fileName, args);
+                
+                if (StartCliProcessCustom(fileName, args))
+                {
+                    _isExternalControlActive = true;
+                    _logger.LogInformation("[DMD Protected] External control activated (CLI launched).");
+                }
+                else
+                {
+                    _logger.LogWarning("[Pinball] Failed to launch CLI command - DMD Protection NOT activated.");
+                    _isExternalControlActive = false; // Ensure it's false
+                }
+                
+                // EN: Try to bring game window to front if it lost focus during launch
+                // FR: Essayer de remettre la fenêtre du jeu au premier plan si elle a perdu le focus au lancement
+                // Using system name as heuristic for process name if needed, or Zaccaria specifically
+                if (system.Contains("zaccaria", StringComparison.OrdinalIgnoreCase))
+                {
+                    // "ZaccariaPinball.exe" is the usual name
+                    await Task.Delay(500); // Wait a bit for window activation if any
+                    _processService.FocusProcess("ZaccariaPinball"); 
+                }
+                
                 return (true, suspendMPV);
             }
             catch (Exception ex)
             {
                 _logger.LogError($"[Pinball] Failed to launch custom command: {ex.Message}");
-                return (true, suspendMPV); // We handled it (failed), don't fallback to standard logic potentially
+                return (true, suspendMPV);
             }
         }
 
@@ -483,7 +537,7 @@ namespace RetroBatMarqueeManager.Application.Services
             return null;
         }
 
-        private void StartCliProcessCustom(string fileName, string args)
+        private bool StartCliProcessCustom(string fileName, string args)
         {
              StopCliProcess();
 
@@ -504,14 +558,27 @@ namespace RetroBatMarqueeManager.Application.Services
                 startInfo.EnvironmentVariables["DMDDEVICE_CONFIG"] = _dmdDeviceIniPath;
 
                 _currentDmdProcess = new Process { StartInfo = startInfo };
+                _currentDmdProcess.EnableRaisingEvents = true; // Enable Exited event
+
+                _currentDmdProcess.OutputDataReceived += (s, e) => { if (e.Data != null) _logger.LogInformation($"[DMD EXT (Custom) STDOUT] {e.Data}"); };
+                _currentDmdProcess.ErrorDataReceived += (s, e) => { if (e.Data != null) _logger.LogError($"[DMD EXT (Custom) STDERR] {e.Data}"); };
+                _currentDmdProcess.Exited += (s, e) => 
+                {
+                    _logger.LogWarning($"[DMD EXT (Custom)] Process exited with code: {_currentDmdProcess.ExitCode}");
+                    _isExternalControlActive = false; // Release lock if process dies
+                };
+
                 _currentDmdProcess.Start();
 
                 _currentDmdProcess.BeginOutputReadLine();
                 _currentDmdProcess.BeginErrorReadLine();
+                
+                return true;
              }
              catch(Exception ex)
              {
                  _logger.LogError($"[Pinball] StartCliProcessCustom Failed: {ex.Message}");
+                 return false;
              }
         }
 
@@ -607,8 +674,57 @@ namespace RetroBatMarqueeManager.Application.Services
             }
         }
 
+        public async Task WaitForExternalReleaseAsync(int timeoutMs = 2000)
+        {
+            // EN: Safety check: If lock is active but no process is running (Manual Mode or Crash), release immediately.
+            // FR: Vérification de sécurité : Si le verrou est actif mais qu'aucun processus ne tourne, libérer immédiatement.
+            bool isProcessRunning = false;
+            try 
+            {
+                if (_currentDmdProcess != null && !_currentDmdProcess.HasExited) isProcessRunning = true;
+            } 
+            catch {}
+
+            if (_isExternalControlActive && !isProcessRunning)
+            {
+                _logger.LogInformation("[DMD] External control active but no managed process running (Manual Mode detected). Force releasing.");
+                _isExternalControlActive = false;
+            }
+
+            if (!_isExternalControlActive)
+            {
+                await EnsureNativeOpenAsync();
+                return;
+            }
+
+            _logger.LogInformation($"[DMD] Waiting up to {timeoutMs}ms for external control release...");
+            int elapsed = 0;
+            int interval = 50;
+            while (_isExternalControlActive && elapsed < timeoutMs)
+            {
+                await Task.Delay(interval);
+                elapsed += interval;
+            }
+
+            if (_isExternalControlActive)
+            {
+                 _logger.LogWarning("[DMD] Timeout waiting for external control release. Forcing takeover.");
+                 StopCliProcess(); // Kill any stuck process
+                 _isExternalControlActive = false;
+                 await EnsureNativeOpenAsync();
+            }
+            else
+            {
+                _logger.LogInformation("[DMD] External control released.");
+                // EN: Proactively open native driver to reset hardware
+                // FR: Ouvrir proactivement le driver natif pour réinitialiser le matériel
+                await EnsureNativeOpenAsync();
+            }
+        }
+
         public void Stop()
         {
+            _isExternalControlActive = false; // Reset protection on explicit Stop()
             StopCliProcess();
             StopAnimation();
             EnsureNativeClosed(); // EN: Also close native driver to fully release DMD device / FR: Fermer aussi le driver natif pour libérer complètement le périphérique DMD
@@ -918,7 +1034,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
                     _logger.LogInformation($"[DMD Native GIF] Pre-cached {frames.Count} frames. Starting playback loop.");
                     
-                    EnsureNativeOpen();
+                    await EnsureNativeOpenAsync();
 
                     // 2. Playback Loop (Ultra Fast - no allocations)
                     while (!token.IsCancellationRequested)

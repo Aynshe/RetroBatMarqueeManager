@@ -582,11 +582,12 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 { "pinballfx2", "dmdext.exe mirror --source=pinballfx2 -d {DmdModel} --quit-when-done" },
                 { "pinballfx3", "dmdext.exe mirror --source=pinballfx3 -d {DmdModel} --colorize --quit-when-done" },
                 { "fpinball", "dmdext.exe mirror --source=futurepinball -d {DmdModel} --colorize --quit-when-done" },
-                { "zaccariapinball", "dmdext.exe mirror --source=screen --position !POSITION! -d {DmdModel}" },
+                { "zaccariapinball", "dmdext.exe mirror --source=screen --position !POSITION! -d {DmdModel};False;True" },
                 { "custom1", "" }
             };
             
             bool needsUpdate = false;
+            
             
             // EN: Check each expected key and add if missing / FR: Vérifier chaque clé attendue et ajouter si manquante
             foreach (var kvp in expectedKeys)
@@ -676,7 +677,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 _settings["pinballfx2"] = "dmdext.exe mirror --source=pinballfx2 -d {DmdModel} --quit-when-done";
                 _settings["pinballfx3"] = "dmdext.exe mirror --source=pinballfx3 -d {DmdModel} --colorize --quit-when-done";
                 _settings["fpinball"] = "dmdext.exe mirror --source=futurepinball -d {DmdModel} --colorize --quit-when-done";
-                _settings["zaccariapinball"] = "dmdext.exe mirror --source=screen --position !POSITION! -d {DmdModel}";
+                _settings["zaccariapinball"] = "dmdext.exe mirror --source=screen --position !POSITION! -d {DmdModel};False;True";
                 _settings["custom1"] = "";
             }
 
@@ -845,7 +846,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                     "ScreenNumber",
                     "pinballfx", "pinballfx2", "pinballfx3", "fpinball", "zaccariapinball", "custom1",
                     "MPVScrapMediaType", "DMDScrapMediaType", "ScreenScraperUser", "ScreenScraperPass", "ScreenScraperDevId", "ScreenScraperDevPassword", "MarqueeGlobalScraping", "ScreenScraperThreads",
-                    "MPVScrapMediaType", "DMDScrapMediaType", "ScreenScraperUser", "ScreenScraperPass", "ScreenScraperDevId", "ScreenScraperDevPassword", "MarqueeGlobalScraping", "ScreenScraperThreads",
+                    "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
                     "RetroAchievementsWebApiKey", "GenerateMarqueeVideoFolder", "MarqueeRetroAchievementsOverlays", "RAFontFamily", "PrioritySource", "ArcadeItaliaUrl", "ArcadeItaliaMediaType", "MarqueeRetroAchievementsDisplayTarget"
                 };
 

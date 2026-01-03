@@ -120,6 +120,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         void StartProcessWithLogging(string fileName, IEnumerable<string> arguments, string? workingDirectory = null);
         bool IsProcessRunning(string processName);
         void KillProcess(string processName);
+        bool FocusProcess(string processName);
     }
 
     public interface IMarqueeFileFinder
@@ -157,5 +158,6 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         void ClearOverlay(); // EN: Clear active overlay / FR: Effacer overlay actif
         void Stop();
         string PrepareConfig(); // Generates DmdDevice.ini if needed
+        Task WaitForExternalReleaseAsync(int timeoutMs = 2000); // Wait for external control to finish
     }
 }

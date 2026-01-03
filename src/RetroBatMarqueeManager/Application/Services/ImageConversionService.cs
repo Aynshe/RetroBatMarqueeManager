@@ -338,7 +338,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(_config.MPVPath) // Use MPV dir as working dir just in case
+                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory // Use App Base Dir
                 };
 
                 // FFmpeg High Quality GIF:
@@ -507,7 +507,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(_config.MPVPath)
+                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory
                 };
 
                 var args = new List<string> { "-y" }; // Overwrite
@@ -666,7 +666,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(_config.MPVPath)
+                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory
                 };
 
                 var args = new List<string> { "-y" };
