@@ -163,3 +163,8 @@ For users of **Zaccaria Pinball**, it is possible to create a virtual secondary 
 3.  Set this virtual display as a secondary screen in Windows settings.
 4.  In Zaccaria Pinball, configure the DMD to display on this specific virtual screen.
 5.  **RetroBat Marquee Manager** can then mirror this screen if needed, or simply let Zaccaria manage the display directly.
+
+> [!IMPORTANT]
+> If you want to **keep MPV active** (e.g. to display a Marquee on another screen) while using Zaccaria, you must ensure the "Suspend MPV" option is disabled in your configuration command.
+> The command format in `config.ini` is: `command;HandleDMD;SuspendMPV`.
+> Ensure the last parameter is `False` (e.g. `zaccaria.exe ... ;True;False`).
