@@ -167,4 +167,9 @@ For users of **Zaccaria Pinball**, it is possible to create a virtual secondary 
 > [!IMPORTANT]
 > If you want to **keep MPV active** (e.g. to display a Marquee on another screen) while using Zaccaria, you must ensure the "Suspend MPV" option is disabled in your configuration command.
 > The command format in `config.ini` is: `command;HandleDMD;SuspendMPV`.
-> Ensure the last parameter is `False` (e.g. `zaccaria.exe ... ;True;False`).
+>
+> **Default (MPV Suspended):**
+> `zaccariapinball=dmdext.exe mirror --source=screen --position !POSITION! -d {DmdModel};False;True`
+>
+> **To Keep MPV Active (Change last value to False):**
+> `zaccariapinball=dmdext.exe mirror --source=screen --position !POSITION! -d {DmdModel};False;False`
