@@ -195,13 +195,17 @@ namespace RetroBatMarqueeManager.Application.Services
         public string? ProcessDmdImage(string sourcePath, string subFolder, string? system = null, string? gameName = null, int offsetX = 0, int offsetY = 0)
         {
             if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath)) return sourcePath;
-            if (string.IsNullOrEmpty(gameName)) gameName = Path.GetFileNameWithoutExtension(sourcePath);
-            string sanitizedName = Sanitize(gameName);
-
             var ext = Path.GetExtension(sourcePath).TrimStart('.').ToLowerInvariant();
             if (ext == "gif") return sourcePath; // Passthrough existing GIFs
             
             bool isVideo = new[] { "mp4", "avi", "webm", "mkv" }.Contains(ext);
+
+            // Fix: For videos (especially generated ones), prefer the source filename to preserve specific versions (e.g. "Sonic The Hedgehog I")
+            if (string.IsNullOrEmpty(gameName) || isVideo)
+            {
+                 gameName = Path.GetFileNameWithoutExtension(sourcePath);
+            }
+            string sanitizedName = Sanitize(gameName);
 
             // User Request: medias\cache\dmd\[GenerateMarqueeVideoFolder]\[system]\[GameName].gif
             // _config.CachePath is .../medias/_cache
@@ -538,7 +542,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     process.ErrorDataReceived += (s, e) => { if (e.Data != null) _logger.LogWarning($"[FFmpeg Gen] {e.Data}"); };
                     process.BeginErrorReadLine();
 
-                    if (!process.WaitForExit(30000)) // 30s timeout for video generation
+                    if (!process.WaitForExit(60000)) // 60s timeout for video generation
                     {
                         _logger.LogWarning($"[VideoGen] Timeout generating video for {gameName}");
                         try { process.Kill(); } catch { }

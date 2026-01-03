@@ -370,8 +370,18 @@ namespace RetroBatMarqueeManager.Application.Services
                 topper = FindGameStartMedia(system, romFileName, gameName);
                 if (topper != null) 
                 {
-                    _logger.LogInformation($"Found topper (Priority 1): {topper}");
-                    return topper;
+                    // Fix: Do not immmediately return scraped images, to allow Video Generation (Priority 2) to run.
+                    // Return immediately only if Custom Override or Video.
+                    var ext = Path.GetExtension(topper).ToLowerInvariant();
+                    var isVideo = new[] { ".mp4", ".avi", ".webm", ".mkv", ".mov", ".gif" }.Contains(ext);
+                    var isCustomStart = !string.IsNullOrEmpty(_config.GameStartMediaPath) && topper.Contains(_config.GameStartMediaPath, StringComparison.OrdinalIgnoreCase);
+
+                    if (isVideo || isCustomStart)
+                    {
+                        _logger.LogInformation($"Found topper (Priority 1 - Video/Custom): {topper}");
+                        return topper;
+                    }
+                    _logger.LogInformation($"Found topper (Scraped Image). Holding for Video Generation check: {topper}");
                 }
             }
 
@@ -454,6 +464,14 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
             }
             
+
+            // Fix: If we held a topper (Priority 1), and Video Gen (Priority 2) didn't return, return topper now.
+            // This prevents Composition (Priority 3) or Basic Marquee (Priority 4) from overriding the Topper.
+            if (topper != null)
+            {
+                 _logger.LogInformation($"Using topper (Fallback after Video Gen): {topper}");
+                 return topper;
+            }
 
             // --- PRIORITY 3: COMPOSITION (If Enabled) ---
             if (_config.MarqueeCompose)
@@ -1047,7 +1065,34 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
             }
 
-            // 2. Search Scrap Cache Path (if scrap type is fed)
+            // --- PRIORITY 2: VIDEO GENERATION (If Enabled) ---
+            // EN: Special priority for Game Start: If no custom media found, prefer generated video over scraped static image.
+            if (_config.MarqueeVideoGeneration)
+            {
+                 var systemCandidates = new List<string> { system };
+                 var videoSource = TryFindVideo(romFileName, systemCandidates) 
+                                ?? TryFindVideo(Sanitize(romFileName), systemCandidates) 
+                                ?? TryFindVideo(gameName, systemCandidates) 
+                                ?? TryFindVideo(Sanitize(gameName), systemCandidates);
+
+                 if (videoSource != null)
+                 {
+                      var logoRaw = TryFind(romFileName, systemCandidates, "-marquee", raw: true) 
+                                 ?? TryFind(gameName, systemCandidates, raw: true)
+                                 ?? FindSystemMarquee(system, raw: true);
+                      
+                      if (logoRaw == _config.DefaultImagePath) logoRaw = "";
+
+                      _logger.LogInformation($"[DMD GameStart] Found video source for generation: {videoSource}");
+                      var generatedVideo = _imageService.GenerateMarqueeVideo(videoSource, logoRaw ?? "", system, romFileName);
+                      if (generatedVideo != null) 
+                      {
+                          return generatedVideo;
+                      }
+                 }
+            }
+
+            // 3. Search Scrap Cache Path (if scrap type is fed)
             if (!string.IsNullOrEmpty(scrapType) && !string.IsNullOrEmpty(_config.ScreenScraperCachePath) && Directory.Exists(_config.ScreenScraperCachePath))
             {
                 var scrapDir = Path.Combine(_config.ScreenScraperCachePath, system);
@@ -1161,6 +1206,9 @@ namespace RetroBatMarqueeManager.Application.Services
                      }
                  }
             }
+
+
+
 
             // --- PRIORITY 1: AUTO-SCRAPING (If Enabled) ---
             if (_config.MarqueeAutoScraping && !string.IsNullOrEmpty(romPath) && allowScraping)
@@ -1498,7 +1546,41 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
             }
 
-            // 2. Search Scrap Cache Path (if scrap type is fed)
+
+            // --- PRIORITY 2: VIDEO GENERATION (If Enabled) ---
+            // EN: If no custom "loading" media found, check for generated video
+            // FR: Si pas de média de chargement custom, vérifier la vidéo générée
+            // Note: This logic duplicates FindDmdImageAsync generation logic but is specific for game-start to prioritize over scraped images found below.
+            if (_config.MarqueeVideoGeneration)
+            {
+                var systemCandidates = new List<string> { system };
+                var videoSource = TryFindVideo(romFileName, systemCandidates) ?? TryFindVideo(Sanitize(romFileName), systemCandidates) ?? TryFindVideo(gameName, systemCandidates) ?? TryFindVideo(Sanitize(gameName), systemCandidates);
+                
+                if (videoSource != null)
+                {
+                    // Minimal logo search for generation context
+                    var logoRaw = TryFind(romFileName, systemCandidates, "-marquee", raw: true) 
+                               ?? TryFind(gameName, systemCandidates, raw: true)
+                               ?? FindSystemMarquee(system, raw: true);
+
+                    if (logoRaw == _config.DefaultImagePath) logoRaw = "";
+
+                    _logger.LogInformation($"[DMD GameStart] Found video source for generation: {videoSource}");
+                    var generatedVideo = _imageService.GenerateMarqueeVideo(videoSource, logoRaw ?? "", system, romFileName);
+                    if (generatedVideo != null)
+                    {
+                         // ProcessDmdImage will handle conversion/caching
+                         // We use "system_start" folder to keep it separate? Or share cache?
+                         // Ideally share cache if it's the same video, but "game-start" might want specific separate cache context? 
+                         // GenerateMarqueeVideo usually returns the video path. We pass it to ProcessDmdImage or just return it? 
+                         // Check return type: FindDmdGameStartMedia returns string.
+                         // FindDmdImageAsync calls _imageService.GenerateMarqueeVideo then returns it (since PlayAsync handles mp4).
+                         return generatedVideo;
+                    }
+                }
+            }
+
+            // --- PRIORITY 3: Search Scrap Cache Path (if scrap type is fed) ---
             if (!string.IsNullOrEmpty(scrapType) && !string.IsNullOrEmpty(_config.ScreenScraperCachePath) && Directory.Exists(_config.ScreenScraperCachePath))
             {
                 var scrapDir = Path.Combine(_config.ScreenScraperCachePath, system);
@@ -1519,6 +1601,8 @@ namespace RetroBatMarqueeManager.Application.Services
                     }
                 }
             }
+
+
 
             return null;
         }
