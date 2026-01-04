@@ -108,25 +108,32 @@ namespace RetroBatMarqueeManager.Application.Services
             
             foreach (var sys in systemCandidates)
             {
-                 // Priority per candidate:
-                 baseNames.Add($"{sys}-{languageCode}-w");
-                 baseNames.Add($"{sys}-w");
-                 baseNames.Add($"{sys}-{languageCode}");
-                 baseNames.Add($"{sys}");
-                 
-                 // Auto patterns
-                 baseNames.Add($"auto-{sys}-{languageCode}");
-                 baseNames.Add($"auto-{sys}");
-                 
-                 // Custom patterns
-                 baseNames.Add($"custom-{sys}-{languageCode}");
-                 baseNames.Add($"custom-{sys}");
+                // Priority per candidate:
+                if (!_config.MarqueeAutoConvert)
+                {
+                    // User Request: Prioritize Topper for System if AutoConvert is FALSE
+                    baseNames.Add($"{sys}-topper"); 
+                    baseNames.Add($"{sys}-topper-w");
+                }
+
+                baseNames.Add($"{sys}-{languageCode}-w");
+                baseNames.Add($"{sys}-w");
+                baseNames.Add($"{sys}-{languageCode}");
+                baseNames.Add($"{sys}");
+                
+                // Auto patterns
+                baseNames.Add($"auto-{sys}-{languageCode}");
+                baseNames.Add($"auto-{sys}");
+                
+                // Custom patterns
+                baseNames.Add($"custom-{sys}-{languageCode}");
+                baseNames.Add($"custom-{sys}");
             }
             
-            foreach (var baseName in baseNames)
+            // PASS 1: Check Custom Path (Strict Priority)
+            if (!string.IsNullOrEmpty(_config.SystemCustomMarqueePath))
             {
-                // 1. Check Custom Path (Priority - Check ALL extensions first)
-                if (!string.IsNullOrEmpty(_config.SystemCustomMarqueePath))
+                foreach (var baseName in baseNames)
                 {
                     foreach (var ext in _config.AcceptedFormats)
                     {
@@ -135,13 +142,17 @@ namespace RetroBatMarqueeManager.Application.Services
                         
                         if (File.Exists(customPath))
                         {
-                             _logger.LogInformation($"Found system marquee in custom path: {customPath}");
+                             _logger.LogInformation($"Found system marquee in custom path (Priority): {customPath}");
                              if (raw) return customPath;
                              return _imageService.ProcessImage(customPath, subFolder: "systems");
                         }
                     }
                 }
+            }
 
+            // PASS 2: Check System/Theme Path (Fallback)
+            foreach (var baseName in baseNames)
+            {
                 // 2. Check in System Path (AND Fallback to -master)
                 var searchPaths = GetThemeSearchPaths(_config.SystemMarqueePath);
                 
@@ -597,12 +608,23 @@ namespace RetroBatMarqueeManager.Application.Services
                     var sysCustomDir = Path.Combine(_config.GameCustomMarqueePath, activeSystem);
                     try { if (!Directory.Exists(sysCustomDir)) Directory.CreateDirectory(sysCustomDir); } catch {}
 
-                    var searchPatterns = new List<string> { nameComponent + suffix };
+                    var searchPatterns = new List<string>();
+                    
+                    // User Request: Prioritize Topper if AutoConvert is FALSE
+                    if (!_config.MarqueeAutoConvert && string.IsNullOrEmpty(suffix))
+                    {
+                        searchPatterns.Add(nameComponent + "-topper");
+                    }
+
+                    searchPatterns.Add(nameComponent + suffix);
                     if (string.IsNullOrEmpty(suffix)) 
                     {
                         searchPatterns.Add(nameComponent + "-marquee");
                         // User Request: Add -marquee_composed
                         searchPatterns.Add(nameComponent + "-marquee_composed");
+                        
+                        // Fallback Topper if not prioritized (or AutoConvert is true - actually keep it as fallback anyway?)
+                        // User requested priority explicitly if false. If true, standard behavior.
                     }
                     
                     foreach (var searchPattern in searchPatterns)
@@ -613,13 +635,40 @@ namespace RetroBatMarqueeManager.Application.Services
                     }
                 }
                 
+                // 1. Try Configured Topper First
+                if (!_config.MarqueeAutoConvert && string.IsNullOrEmpty(suffix))
+                {
+                    var basicPattern = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", nameComponent);
+                    var topperPattern = basicPattern.Contains("-marquee") 
+                        ? basicPattern.Replace("-marquee", "-topper") 
+                        : basicPattern + "-topper";
+
+                    var topperPath = Path.Combine(_config.MarqueeImagePath, topperPattern);
+                    var foundTopper = raw ? FindSourceFile(topperPath) : FindFile(topperPath, subFolder: activeSystem);
+                    if (foundTopper != null) return foundTopper;
+                }
+
                 // 1. Try Custom/Configured Path
                 var pattern = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", nameComponent) + suffix;
                 var path = Path.Combine(_config.MarqueeImagePath, pattern);
                 var found = raw ? FindSourceFile(path) : FindFile(path, subFolder: activeSystem);
                 if (found != null) return found;
                 
-                // 2. Try Default Path
+                // 2. Try Default Path (Topper Priority if applicable)
+                if (!_config.MarqueeAutoConvert && string.IsNullOrEmpty(suffix))
+                {
+                    // 2a. Try Default Topper First
+                    var basicDefPattern = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", nameComponent);
+                    var defTopperPattern = basicDefPattern.Contains("-marquee") 
+                        ? basicDefPattern.Replace("-marquee", "-topper") 
+                        : basicDefPattern + "-topper";
+                    
+                    var defTopperPath = Path.Combine(_config.MarqueeImagePathDefault, defTopperPattern);
+                    var foundDefTopper = raw ? FindSourceFile(defTopperPath) : FindFile(defTopperPath, subFolder: activeSystem);
+                    if (foundDefTopper != null) return foundDefTopper;
+                }
+
+                // 2b. Try Default Path Standard
                 var defaultPattern = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", nameComponent);
                 if (!string.IsNullOrEmpty(suffix))
                 {

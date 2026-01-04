@@ -819,6 +819,8 @@ namespace RetroBatMarqueeManager.Application.Workflows
             }
         }
 
+        private readonly object _navigationLock = new object();
+
         private async Task ProcessIpcMessageAsync(string message)
         {
             _logger.LogInformation($"IPC Raw: {message}");
@@ -833,25 +835,45 @@ namespace RetroBatMarqueeManager.Application.Workflows
             var p3 = parts.Length > 3 ? parts[3] : "";
             var p4 = parts.Length > 4 ? parts[4] : "";
             
-            // Cancellation Logic for Navigation Events
+            // Cancellation Logic for Navigation Events (Debounce)
             if (eventName == "game-selected" || eventName == "system-selected")
             {
-                _selectionCts?.Cancel();
-                _selectionCts = new CancellationTokenSource();
-                var token = _selectionCts.Token;
+                CancellationTokenSource cts;
+                lock (_navigationLock)
+                {
+                    _selectionCts?.Cancel();
+                    _selectionCts?.Dispose();
+                    _selectionCts = new CancellationTokenSource();
+                    cts = _selectionCts;
+                }
 
-                try 
+                // Fire and forget task wrapper with debounce
+                _ = Task.Run(async () => 
                 {
-                    await ProcessEventAsync(eventName, p1, p2, p3, p4, token);
-                }
-                catch (OperationCanceledException)
-                {
-                    _logger.LogDebug($"Event {eventName} cancelled by newer event.");
-                }
+                    try 
+                    {
+                        // EN: Debounce delay (wait for user to stop scrolling)
+                        // FR: Délai de debounce (attendre que l'utilisateur arrête de défiler)
+                        // 30ms is faster for snappier feel (approx 2 frames)
+                        await Task.Delay(30, cts.Token);
+
+                        if (cts.Token.IsCancellationRequested) return;
+
+                        await ProcessEventAsync(eventName, p1, p2, p3, p4, cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected when scrolling fast
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"Error processing debounced event {eventName}: {ex.Message}");
+                    }
+                });
             }
             else
             {
-                // Other events (start/end) process normally without cancellation
+                // Other events (start/end) process normally immediately without cancellation
                 await ProcessEventAsync(eventName, p1, p2, p3, p4, CancellationToken.None);
             }
         }
@@ -944,6 +966,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     break;
                 case "game-end":
                     _logger.LogInformation("Game ended. Checking for GAME OVER screen...");
+                    _gameRunning = false; // EN: Set game running flag to false to prevent delayed RA overlays
 
                     // EN: Explicitly reset RA state on game end
                     // FR: Réinitialiser explicitement l'état RA à la fin du jeu
@@ -952,6 +975,8 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     // EN: Remove RA Score and Badge Ribbon Overlays
                     // FR: Supprimer overlays RA Score et Bandeau de badges
                     await _mpv.RemoveOverlay(cancelTimer: true);
+                    await _mpv.ClearRetroAchievementData(); // EN: Clear Lua OSD / FR: Effacer OSD Lua
+
                     _badgeCycleCts?.Cancel(); // EN: Stop DMD badge cycle / FR: Arrêter cycle badges DMD
                     _mpvBadgeCycleCts?.Cancel(); // EN: Stop MPV badge cycle / FR: Arrêter cycle badges MPV
                     _dmdService.ClearOverlay(); // EN: Clear badge ribbon overlay / FR: Effacer overlay bandeau de badges
@@ -1110,7 +1135,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
             
             var mpvTask = Task.Run(async () => {
                 if (token.IsCancellationRequested) return;
-                await DisplayMpvSystemAsync(systemName);
+                await DisplayMpvSystemAsync(systemName, token);
             }, token);
 
             try 
@@ -1137,21 +1162,23 @@ namespace RetroBatMarqueeManager.Application.Workflows
              }
         }
 
-        private async Task DisplayMpvSystemAsync(string systemName)
+        private async Task DisplayMpvSystemAsync(string systemName, CancellationToken token = default)
         {
+             if (token.IsCancellationRequested) return;
              var marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("system-selected", systemName, "", "", "");
              
+             if (token.IsCancellationRequested) return;
              if (_gameRunning) return; // Prevent overwriting if game started during lookup
 
              if (marqueeFile != null)
              {
-                 await _mpv.DisplayImage(marqueeFile);
+                 await _mpv.DisplayImage(marqueeFile, loop: true, token: token);
                  _logger.LogInformation($"Displayed system marquee: {marqueeFile}");
              }
              else
              {
                  _logger.LogWarning($"No system marquee found for {systemName}, using default");
-                 await _mpv.DisplayImage(_config.DefaultImagePath, loop: true);
+                 await _mpv.DisplayImage(_config.DefaultImagePath, loop: true, token: token);
              }
         }
 
@@ -1430,13 +1457,13 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
              if (marqueeFile != null)
              {
-                 await _mpv.DisplayImage(marqueeFile);
+                 await _mpv.DisplayImage(marqueeFile, loop: true, token: token);
                  _logger.LogInformation($"Displayed: {marqueeFile}");
              }
              else
              {
                  _logger.LogWarning($"No marquee found for {gameName}, using default");
-                 await _mpv.DisplayImage(_config.DefaultImagePath, loop: true);
+                 await _mpv.DisplayImage(_config.DefaultImagePath, loop: true, token: token);
              }
         }
 
@@ -1712,14 +1739,18 @@ namespace RetroBatMarqueeManager.Application.Workflows
                                 var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, e.UserProgress.Achievements.Count, isDmd: true);
                                 if (File.Exists(dmdCount))
                                 {
+                                    if (!_gameRunning) return; // Prevent if game stopped
                                     await _dmdService.SetOverlayAsync(dmdCount, 5000); // Show for 5s
                                     _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay: {dmdCount}");
+                                    
                                     await Task.Delay(5000); // Wait before showing score
+                                    if (!_gameRunning) return; // Prevent if game stopped during delay
                                 }
                             }
                             
                             if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase) && File.Exists(dmdScore))
                             {
+                                if (!_gameRunning) return;
                                 // DMD: Show for 5 seconds
                                 await _dmdService.SetOverlayAsync(dmdScore, 5000);
                                 _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay: {dmdScore}");
@@ -1822,6 +1853,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 var composed = _imageService.ComposeScoreAndBadges(scoreOverlay, null, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight);
                 if (!string.IsNullOrEmpty(composed) && File.Exists(composed))
                 {
+                    if (!_gameRunning) return; // Prevent race condition if game ended
                     // EN: Show indefinitely (1h) until next update
                     await _mpv.ShowOverlay(composed, 3600000, "top-left");
                     _logger.LogInformation($"[RA Workflow] Refreshed persistent MPV overlays: {Path.GetFileName(composed)}");

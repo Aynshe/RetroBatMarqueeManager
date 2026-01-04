@@ -285,7 +285,9 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
         // MarqueeAutoGeneration moved to alias below
         public bool MarqueeAutoConvert => GetValue("MarqueeAutoConvert", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
         public bool MarqueeVideoGeneration => GetValue("MarqueeVideoGeneration", "false").Equals("true", StringComparison.OrdinalIgnoreCase);
+
         public string GenerateMarqueeVideoFolder => GetValue("GenerateMarqueeVideoFolder", "generated_videos");
+        public string FfmpegHwEncoding => GetValue("FfmpegHwEncoding", ""); // Default: empty (software/x264)
         public bool MarqueeCompose => GetValue("MarqueeCompose", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
         // Alias for backward compatibility if code used it, or mapped to same key
         public bool MarqueeAutoGeneration => MarqueeCompose;
@@ -300,6 +302,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
         // Dimensions
         public int MarqueeWidth => int.TryParse(GetValue("MarqueeWidth", "1920"), out var w) ? w : 1920;
         public int ScreenNumber => int.TryParse(GetValue("ScreenNumber", "2"), out var s) ? s : 2;
+        public string MpvHwDecoding => GetValue("HwDecoding", "no");
         
         public bool IsMpvEnabled 
         {
@@ -576,6 +579,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 
                 // IPC  
                 { "ScreenNumber", "1" },
+                { "HwDecoding", "no" },
                 
                 // Pinball
                 { "pinballfx", "True" },
@@ -625,6 +629,8 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 _settings["MarqueeLayout"] = "gradient-standard";
                 _settings["MarqueeAutoConvert"] = "true";
                 _settings["MarqueeVideoGeneration"] = "false"; // Added
+                _settings["GenerateMarqueeVideoFolder"] = "generated_videos"; // Added
+                _settings["FfmpegHwEncoding"] = ""; // Added
                 _settings["MarqueeAutoScraping"] = "false";
                 _settings["MPVScrapMediaType"] = "";
                 _settings["DMDScrapMediaType"] = "";
@@ -671,6 +677,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 
                 // ScreenMPV
                 _settings["ScreenNumber"] = "1";
+                _settings["HwDecoding"] = "no";
                 
                 // Pinball
                 _settings["pinballfx"] = "True";
@@ -709,7 +716,10 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 WriteKey(sb, "MarqueeLayout", "gradient-standard");
                 WriteKey(sb, "MarqueeAutoConvert", "true");
                 WriteKey(sb, "MarqueeVideoGeneration", "false"); // Added
+
                 WriteKey(sb, "GenerateMarqueeVideoFolder", "generated_videos"); // Added
+                sb.AppendLine("; FFmpeg Hardware Encoding (empty=software, h264_nvenc, h264_amf, h264_qsv)");
+                WriteKey(sb, "FfmpegHwEncoding", ""); // Added
                 
                 sb.AppendLine("; RetroAchievements");
                 WriteKey(sb, "MarqueeRetroAchievements", "false"); // Ensure key exists
@@ -816,7 +826,10 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 WriteKey(sb, "GameCustomMarqueePath", "");
                 WriteKey(sb, "GameStartMediaPath", "");
                 sb.AppendLine("; MPV Screen Index (0=Primary, 1=Secondary, etc.)");
+
                 WriteKey(sb, "ScreenNumber", "1");
+                sb.AppendLine("; Hardware Decoding (auto, d3d11va, dxva2, no)");
+                WriteKey(sb, "HwDecoding", "no");
 
                 // --- [Pinball] ---
                 sb.AppendLine();
@@ -847,7 +860,10 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                     "pinballfx", "pinballfx2", "pinballfx3", "fpinball", "zaccariapinball", "custom1",
                     "MPVScrapMediaType", "DMDScrapMediaType", "ScreenScraperUser", "ScreenScraperPass", "ScreenScraperDevId", "ScreenScraperDevPassword", "MarqueeGlobalScraping", "ScreenScraperThreads",
                     "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
-                    "RetroAchievementsWebApiKey", "GenerateMarqueeVideoFolder", "MarqueeRetroAchievementsOverlays", "RAFontFamily", "PrioritySource", "ArcadeItaliaUrl", "ArcadeItaliaMediaType", "MarqueeRetroAchievementsDisplayTarget"
+                    "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
+                    "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
+                    "RetroAchievementsWebApiKey", "GenerateMarqueeVideoFolder", "FfmpegHwEncoding", "MarqueeRetroAchievementsOverlays", "RAFontFamily", "PrioritySource", "ArcadeItaliaUrl", "ArcadeItaliaMediaType", "MarqueeRetroAchievementsDisplayTarget",
+                    "HwDecoding"
                 };
 
                 foreach(var kvp in _settings)

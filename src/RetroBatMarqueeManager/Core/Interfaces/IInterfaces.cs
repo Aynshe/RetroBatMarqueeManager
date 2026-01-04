@@ -36,6 +36,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         bool MarqueeAutoGeneration { get; }
         bool MarqueeVideoGeneration { get; }
         string GenerateMarqueeVideoFolder { get; }
+        string FfmpegHwEncoding { get; }
         bool MarqueeCompose { get; }
         bool MarqueeAutoScraping { get; }
         string MPVScrapMediaType { get; }
@@ -109,6 +110,8 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         Dictionary<string, string> CollectionCorrelation { get; }
         Dictionary<string, string> SystemAliases { get; }
         string GetSetting(string key, string defaultValue = "");
+
+        string MpvHwDecoding { get; }
     }
 
     public interface IProcessService

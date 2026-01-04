@@ -85,8 +85,22 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                 CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "idle", "yes"));
                 CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "keep-open", "yes"));
                 CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "vo", "gpu"));
-                // HWDec auto can cause issues on some systems/drivers with embedded mpv (black screen)
-                // CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "hwdec", "auto"));
+                
+                // Hardware Decoding (default: no)
+                var hwDec = _config.MpvHwDecoding;
+                if (!string.IsNullOrEmpty(hwDec) && !hwDec.Equals("no", StringComparison.OrdinalIgnoreCase))
+                {
+                    // EN: Force copy mode for d3d11va/dxva2 to allow software filters (overlays) to work on top of video
+                    // FR: Forcer mode copy pour d3d11va/dxva2 pour permettre aux filtres logiciels (overlays) de fonctionner
+                    if (hwDec.Equals("d3d11va", StringComparison.OrdinalIgnoreCase)) hwDec = "d3d11va-copy";
+                    else if (hwDec.Equals("dxva2", StringComparison.OrdinalIgnoreCase)) hwDec = "dxva2-copy";
+                }
+                CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "hwdec", hwDec));
+                if (!string.IsNullOrEmpty(hwDec) && !hwDec.Equals("no", StringComparison.OrdinalIgnoreCase))
+                {
+                    CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "hwdec-codecs", "all"));
+                }
+                _logger.LogInformation($"[MPV] HW Usage: {hwDec}");
                 
                 // Scripts
                 var scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "lua");
@@ -202,12 +216,14 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
             }
         }
 
-        public async Task DisplayImage(string imagePath, bool loop = true)
+        public async Task DisplayImage(string imagePath, bool loop = true, CancellationToken token = default)
         {
             if (!_isInitialized || _mpvHandle == IntPtr.Zero) return;
             
             try
             {
+                if (token.IsCancellationRequested) return;
+
                 // EN: Ensure form is visible (in case it was stopped/hidden)
                 // FR: S'assurer que le formulaire est visible
                 if (_form != null && !_form.IsDisposed)
@@ -218,9 +234,13 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                     });
                 }
 
+                if (token.IsCancellationRequested) return;
+
                 var safePath = imagePath.Replace("\\", "/");
                 CheckError(LibMpvNative.mpv_set_property_string(_mpvHandle, "loop-file", loop ? "inf" : "no"));
                 
+                if (token.IsCancellationRequested) return;
+
                 _logger.LogInformation($"[MPV] DisplayImage: Loading '{safePath}'");
                 int res = LibMpvNative.Command(_mpvHandle, new[] { "loadfile", safePath, "replace" });
                 CheckError(res);
@@ -250,6 +270,24 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
             catch (Exception ex)
             {
                  _logger.LogError($"[MPV] Error Push RA: {ex.Message}");
+            }
+            await Task.CompletedTask;
+        }
+
+        public async Task ClearRetroAchievementData()
+        {
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return;
+
+            try 
+            {
+                // EN: Send explicit clear command to Lua script
+                // FR: Envoyer une commande d'effacement explicite au script Lua
+                ExecuteCommand(new[] { "script-message", "push-ra", "clear" });
+                _logger.LogInformation("[MPV] Sent Clear RA Data command");
+            }
+            catch (Exception ex)
+            {
+                 _logger.LogError($"[MPV] Error Clear RA Data: {ex.Message}");
             }
             await Task.CompletedTask;
         }

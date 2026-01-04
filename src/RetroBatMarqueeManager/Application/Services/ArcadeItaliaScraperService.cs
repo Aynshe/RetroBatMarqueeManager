@@ -100,15 +100,11 @@ namespace RetroBatMarqueeManager.Application.Services
             // But usually mediaType passed here is "mpv" or "dmd". 
             // We need to decide if we scrape based on the requested output (mpv/dmd) mapping to marquee.
             
-            // Logic: The caller (Manager) asks for "mpv" or "dmd".
-            // We check if the config for that output type effectively needs a marquee, 
-            // AND if ArcadeItalia is configured to provide that.
+            // EN: Logic: The caller (Manager) asks for "mpv" or "dmd".
+            // We assume ArcadeItalia provides "images" (marquees).
             
-            // Simplified: We assume ArcadeItalia provides "images" (marquees).
-            // We'll check if we should scrape.
-            
-            string scrapMediaType = mediaType == "mpv" ? _config.MPVScrapMediaType : _config.DMDScrapMediaType;
-            if (string.IsNullOrWhiteSpace(scrapMediaType)) return null;
+            // REMOVED: Dependency on ScreenScraper config keys (MPVScrapMediaType/DMDScrapMediaType)
+            // ArcadeItalia uses its own ArcadeItaliaMediaType config.
 
             // ADB is primarily for MAME/Arcade. check system?
             // "arcade", "mame", "neogeo", "fba", "fbneo" are likely candidates.

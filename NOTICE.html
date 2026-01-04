@@ -194,6 +194,16 @@
             display: block;
         }
 
+        /* Fix for tables and inline elements */
+        th.active-lang,
+        td.active-lang {
+            display: table-cell;
+        }
+
+        span.active-lang {
+            display: inline;
+        }
+
         .alert {
             padding: 15px;
             border-radius: 4px;
@@ -416,6 +426,28 @@
                 </div>
 
                 <div class="config-card">
+                    <span class="config-key">Topper Priority</span>
+                    <div class="lang-en">
+                        <p class="config-desc">If <code>MarqueeAutoConvert=false</code> AND
+                            <code>MarqueeCompose=false</code>:
+                        </p>
+                        <p class="config-desc">The system will prioritize files ending in <code>-topper</code> (e.g.
+                            <code>game-topper.png</code>, <code>system-topper.png</code>) found in your standard theme
+                            folders.
+                        </p>
+                    </div>
+                    <div class="lang-fr">
+                        <p class="config-desc">Si <code>MarqueeAutoConvert=false</code> ET
+                            <code>MarqueeCompose=false</code> :
+                        </p>
+                        <p class="config-desc">Le système donnera la priorité aux fichiers se terminant par
+                            <code>-topper</code> (ex: <code>game-topper.png</code>, <code>system-topper.png</code>)
+                            trouvés dans vos dossiers de thème standard.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="config-card">
                     <span class="config-key">MarqueeVideoGeneration</span>
                     <p class="lang-en config-desc">Automatically create marquee videos from existing game preview clips.
                     </p>
@@ -439,6 +471,29 @@
                         <strong>Important :</strong> Pour passer de <code>windows</code> à <code>retrobat</code> (ou
                         inversement), vous devez d'abord mettre sur <code>false</code>, enregistrer, redémarrer
                         l'application, puis seulement ensuite choisir le nouveau mode.
+                    </div>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">Hardware Acceleration (config.ini ONLY)</span>
+                    <div class="lang-en">
+                        <p class="config-desc">Options available only via direct <code>config.ini</code> edit:</p>
+                        <ul>
+                            <li><strong>HwDecoding</strong>: MPV Playback (<code>auto</code>, <code>d3d11va</code>,
+                                <code>dxva2</code>, <code>no</code>).</li>
+                            <li><strong>FfmpegHwEncoding</strong>: Video Generation (<code>nvenc</code>,
+                                <code>h264_amf</code>, <code>h264_qsv</code>, <code>cpu</code>).</li>
+                        </ul>
+                    </div>
+                    <div class="lang-fr">
+                        <p class="config-desc">Options disponibles uniquement via édition directe de
+                            <code>config.ini</code> :</p>
+                        <ul>
+                            <li><strong>HwDecoding</strong> : Lecture MPV (<code>auto</code>, <code>d3d11va</code>,
+                                <code>dxva2</code>, <code>no</code>).</li>
+                            <li><strong>FfmpegHwEncoding</strong> : Génération Vidéo (<code>nvenc</code>,
+                                <code>h264_amf</code>, <code>h264_qsv</code>, <code>cpu</code>).</li>
+                        </ul>
                     </div>
                 </div>
             </div>

@@ -60,12 +60,17 @@ Edit `config.ini` in the plugin folder to customize behavior.
 *   **General Settings**:
     *   `MarqueeWidth` / `MarqueeHeight`: Resolution of your secondary screen (e.g. 1920x360).
     *   `ScreenNumber`: Monitor index to display on (usually `2`). Set to `false` to disable MPV display entirely (only DMD).
+    *   `ScreenNumber`: Monitor index to display on (usually `2`). Set to `false` to disable MPV display entirely (only DMD).
     *   `MarqueeCompose`: `true` to enable auto-composition (Fanart+Logo), `false` for simple image display.
     *   `AcceptedFormats`: List of supported file types (e.g. `mp4, png, jpg, svg`).
+    *   **Hardware Acceleration** (Config.ini Only):
+        *   `HwDecoding` (MPV): Video decoding (auto, d3d11va, dxva2, no).
+        *   `FfmpegHwEncoding`: Video encoding for generation (nvenc, h264_amf, h264_qsv, cpu).
 
 *   **Paths & Patterns**:
     *   `MarqueeFilePath`: Pattern to find game images (e.g. `{system_name}\{game_name}`).
     *   `SystemAliases`: Map short system names to folder names (e.g. `gc=gamecube`).
+    *   **Topper Support**: If `MarqueeAutoConvert=false` and `MarqueeCompose=false`, the system will prioritize files ending in `-topper` (e.g. `game-topper.png`, `system-topper.png`) found in your configured theme folders (`logos` for systems, `images` for games). This override applies to both System and Game marquees.
 
 *   **Scraping Settings**:
     *   `MarqueeAutoScraping`: Enable automatic media scraping. **Priority**: Scraped media takes precedence over default images found in the ROM folder.

@@ -336,6 +336,11 @@ namespace RetroBatMarqueeManager.Application.Services
                     ext = Path.GetExtension(mediaPath).TrimStart('.').ToLowerInvariant();
                     isVideo = new[] { "gif", "mp4", "avi", "webm", "mkv" }.Contains(ext);
                 }
+                else
+                {
+                    _logger.LogWarning($"[DMD Play] MP4 conversion failed for {mediaPath}. Aborting playback (dmdext does not support raw MP4).");
+                    return;
+                }
             }
 
             if (_dmdWrapper.IsLoaded)
@@ -1102,9 +1107,20 @@ namespace RetroBatMarqueeManager.Application.Services
                             // High-precision delay for fast animations
                             if (frame.delayMs < 16) 
                             { 
-                                // Spin-wait for extremely short delays (rare for GIFs but possible)
+                                // Hybrid Wait: Sleep to save CPU, then Spin for precision
                                 var sw = Stopwatch.StartNew();
-                                while (sw.ElapsedMilliseconds < frame.delayMs && !token.IsCancellationRequested) { }
+                                
+                                // Sleep while we have > 2ms remaining
+                                while (sw.ElapsedMilliseconds < frame.delayMs - 2 && !token.IsCancellationRequested)
+                                {
+                                    Thread.Sleep(1); 
+                                }
+                                
+                                // Spin for the final milliseconds
+                                while (sw.ElapsedMilliseconds < frame.delayMs && !token.IsCancellationRequested) 
+                                { 
+                                    Thread.SpinWait(10); // Lightweight spin
+                                }
                             }
                             else
                             {

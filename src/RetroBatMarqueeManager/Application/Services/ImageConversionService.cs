@@ -58,6 +58,13 @@ namespace RetroBatMarqueeManager.Application.Services
                 return sourcePath;
             }
 
+            // EN: Check Config: If AutoConvert is disabled AND it's not an SVG (SVGs always need conversion), return original
+            // FR: Vérifier Config: Si AutoConvert est désactivé ET ce n'est pas un SVG (les SVG nécessitent toujours une conversion), retourner l'original
+            if (!_config.MarqueeAutoConvert && ext != "svg")
+            {
+                return sourcePath;
+            }
+
             // Determines target path
             // Cache Structure: _cache/{subFolder}/{filename}
             // If subFolder is empty, use root _cache (or throw?)
@@ -399,6 +406,13 @@ namespace RetroBatMarqueeManager.Application.Services
                     // The original code was reading it.
                     var err = process.StandardError.ReadToEnd();
                     _logger.LogError($"FFmpeg Error ({process.ExitCode}): {err}");
+
+                    // Fix: If input file is invalid (moov atom not found), delete it to prevent infinite failure loops on retry
+                    if (err.Contains("moov atom not found") || err.Contains("Invalid data found"))
+                    {
+                        _logger.LogWarning($"[Self-Healing] Detected corrupt source file '{source}'. Deleting it to force regeneration on next run.");
+                        try { File.Delete(source); } catch (Exception exDel) { _logger.LogError($"Failed to delete corrupt file: {exDel.Message}"); }
+                    }
                     
                     return false;
                 }
@@ -446,7 +460,14 @@ namespace RetroBatMarqueeManager.Application.Services
                 // Check cache reuse
                 if (File.Exists(targetPath))
                 {
-                    if (File.GetLastWriteTime(sourceVideo) <= File.GetLastWriteTime(targetPath))
+                    // Fix: Check for zero-byte or small corrupted files
+                    var info = new FileInfo(targetPath);
+                    if (info.Length < 1024) // < 1KB is likely trash or touch
+                    {
+                         _logger.LogWarning($"[VideoGen] Found small/empty cached file ({info.Length} bytes). Deleting: {targetPath}");
+                         try { File.Delete(targetPath); } catch {}
+                    }
+                    else if (File.GetLastWriteTime(sourceVideo) <= File.GetLastWriteTime(targetPath))
                     {
                         var logoTime = File.Exists(logoPath) ? File.GetLastWriteTime(logoPath) : DateTime.MinValue;
                         if (logoTime <= File.GetLastWriteTime(targetPath))
@@ -526,9 +547,24 @@ namespace RetroBatMarqueeManager.Application.Services
                 {
                     args.Add("-vf"); args.Add(filter);
                 }
-                args.Add("-c:v"); args.Add("libopenh264");
-                args.Add("-preset"); args.Add("veryfast"); // Balance speed/quality for on-the-fly generation
-                args.Add("-crf"); args.Add("23"); // Decent quality
+                // --- FFmpeg HW Encoding ---
+                // If config is set (h264_nvenc, h264_amf, h264_qsv), use it.
+                var hwEnc = _config.FfmpegHwEncoding;
+                if (!string.IsNullOrWhiteSpace(hwEnc))
+                {
+                    _logger.LogInformation($"[VideoGen] Using HW Encoder: {hwEnc}");
+                    args.Add("-c:v");
+                    args.Add(hwEnc);
+                    // HW encoders often handle bitrate/quality differently than CRF. 
+                    // To keep it simple, we let the encoder use its defaults or add simple preset
+                    // args.Add("-preset"); args.Add("fast"); 
+                }
+                else
+                {
+                     args.Add("-c:v"); args.Add("libopenh264");
+                     args.Add("-preset"); args.Add("veryfast"); 
+                     args.Add("-crf"); args.Add("23"); 
+                }
                 args.Add("-an"); // Remove audio (Marquee is silent)
                 args.Add(targetPath);
 
