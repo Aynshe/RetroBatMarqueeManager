@@ -1,7 +1,13 @@
 using RetroBatMarqueeManager.Core.Interfaces;
 using RetroBatMarqueeManager.Application.Services;
 using RetroBatMarqueeManager.Core.Models.RetroAchievements;
+using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Linq;
+using System.IO;
+using System.Threading.Tasks;
+using System;
+using Microsoft.Extensions.Logging;
 
 namespace RetroBatMarqueeManager.Application.Workflows
 {
@@ -25,6 +31,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private string? _currentGameRom; // ROM path of currently running game
         private bool _mpvSuspendedForPinball = false; // EN: True if MPV was stopped for pinball / FR: Vrai si MPV a été arrêté pour pinball
         private readonly IScraperManager _scraperManager;
+        private readonly IOverlayTemplateService _templateService;
 
         private readonly IInputService _inputService;
         private readonly IProcessService _processService;
@@ -44,6 +51,17 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private string? _lastPlayedVideoPath = null; // EN: Track last played video to avoid reloading in loop / FR: Suivre dernière vidéo pour éviter rechargement en boucle
         private CancellationTokenSource? _badgeCycleCts; // EN: For DMD badge cycling / FR: Pour cycle badges DMD
         private CancellationTokenSource? _mpvBadgeCycleCts; // EN: For MPV badge cycling / FR: Pour cycle badges MPV
+        private CancellationTokenSource? _dmdChallengeCycleCts; // EN: For DMD challenge cycling / FR: Pour cycle challenges DMD
+        private CancellationTokenSource? _dmdRpStatRotationCts; // EN: For DMD RP stat rotation / FR: Pour rotation stats RP DMD
+        private int _dmdRpStatIndex = 0; // EN: Current index for RP stat rotation / FR: Index actuel pour rotation stats RP
+        private Dictionary<string, string> _currentDmdRpStats = new(); // EN: Stored stats for rotation / FR: Stats stockées pour la rotation
+        private readonly ConcurrentDictionary<int, CancellationTokenSource> _challengeRefreshCts = new(); // EN: For real-time timer refresh / FR: Pour rafraîchissement temps réel timer
+        private ConcurrentDictionary<int, ChallengeState> _activeChallenges = new(); // EN: Storage for all active challenges / FR: Stockage pour tous les défis actifs (Now ConcurrentDictionary)
+        private CancellationTokenSource? _mpvChallengeCycleCts; // EN: For MPV challenge cycling / FR: Pour cycle challenges MPV        
+        // Active Media Paths
+        private string? _currentMarqueePath; 
+        private string? _currentDmdPath;
+        private string? _currentDmdRibbonPath; // EN: Track last DMD ribbon for composition / FR: Suivre le dernier ruban DMD pour composition
 
         public MarqueeWorkflow(
             IConfigService config, 
@@ -56,6 +74,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
             VideoMarqueeService videoService,
             VideoOffsetStorageService videoOffsetStorage,
             IScraperManager scraperManager,
+            IOverlayTemplateService templateService,
             ILogger<MarqueeWorkflow> logger,
             RetroAchievementsService? raService = null)
         {
@@ -69,6 +88,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
             _videoService = videoService;
             _videoOffsetStorage = videoOffsetStorage;
             _scraperManager = scraperManager;
+            _templateService = templateService;
             _raService = raService;
             _logger = logger;
             
@@ -106,8 +126,35 @@ namespace RetroBatMarqueeManager.Application.Workflows
             {
                 _raService.AchievementUnlocked += OnAchievementUnlocked;
                 _raService.GameStarted += OnGameStarted;
+                _raService.HardcoreStatusChanged += OnHardcoreStatusChanged;
+                // EN: Subscribe to Rich Presence
+                _raService.RichPresenceUpdated += OnRichPresenceUpdated;
+                _raService.ChallengeUpdated += OnChallengeUpdated;
+                _raService.AchievementDetected += OnAchievementDetected; // EN: Subscribe to immediate detection / FR: S'abonner à la détection immédiate
                 _raService.SetImageConversionService(_imageService); // EN: For grayscale badge generation / FR: Pour génération badge niveaux de gris
                 _logger.LogInformation("[RA Workflow] Subscribed to RetroAchievements events");
+            }
+        }
+
+        private bool _isProcessingAchievement = false; // EN: Flag to suppress RP during achievement sequences / FR: Flag pour supprimer RP pendant séquences succès
+
+        private void OnAchievementDetected(object? sender, EventArgs e)
+        {
+            if (!_isProcessingAchievement)
+            {
+                _logger.LogInformation("[RA Workflow] Achievement detected! Suppressing RP updates temporarily.");
+                _isProcessingAchievement = true;
+                
+                // EN: Safety timeout to reset flag in case event/sequence fails
+                // FR: Timeout de sécurité pour reset le flag si l'événement/la séquence échoue
+                _ = Task.Delay(15000).ContinueWith(_ => 
+                {
+                    if (_isProcessingAchievement)
+                    {
+                        _isProcessingAchievement = false;
+                        _logger.LogWarning("[RA Workflow] Achievement processing flag timed out - RP restored.");
+                    }
+                });
             }
         }
 
@@ -120,6 +167,10 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private double _pendingFanartScale = 0.0;
         private double _pendingLogoScale = 0.0;
         private bool _isVideoPlaybackMode = false; // EN: True if playing source video for trimming / FR: Vrai si lecture vidéo source pour découpe
+        private RichPresenceState? _lastRpState; // EN: Track last RP state / FR: Suivre dernier état RP
+        private DateTime _lastDmdRpUpdate = DateTime.MinValue; // EN: Debounce for DMD RP / FR: Limitation fréquence DMD RP
+        private DateTime _dmdRpDisplayExpiry = DateTime.MinValue; // EN: Expiry for showing RP on DMD / FR: Expiration de l'affichage RP sur DMD
+        private string _lastDmdText = string.Empty; // EN: Track last text sent to DMD / FR: Suivre dernier texte envoyé au DMD
 
         private void HandleMoveCommand(int dx, int dy, bool isLogo)
         {
@@ -964,6 +1015,19 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 case "game-start":
                     await HandleGameStart(param1, param2, param3);
                     break;
+                case "stop-preview":
+                    _logger.LogInformation("Stopping preview mode (IPC command received).");
+                    // EN: Cancel running preview task to prevent it from overlaying after cleanup
+                    // FR: Annuler la tâche de preview en cours pour éviter qu'elle n'affiche après le nettoyage
+                    if (_previewCts != null) { _previewCts.Cancel(); }
+                    
+                    if (_bgPreviewTask != null)
+                    {
+                        try { await _bgPreviewTask; } catch { }
+                    }
+                    
+                    await CleanupAllOverlays();
+                    break;
                 case "game-end":
                     _logger.LogInformation("Game ended. Checking for GAME OVER screen...");
                     _gameRunning = false; // EN: Set game running flag to false to prevent delayed RA overlays
@@ -972,36 +1036,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     // FR: Réinitialiser explicitement l'état RA à la fin du jeu
                     _raService?.ResetState();
 
-                    // EN: Remove RA Score and Badge Ribbon Overlays
-                    // FR: Supprimer overlays RA Score et Bandeau de badges
-                    await _mpv.RemoveOverlay(cancelTimer: true);
-                    await _mpv.ClearRetroAchievementData(); // EN: Clear Lua OSD / FR: Effacer OSD Lua
-
-                    _badgeCycleCts?.Cancel(); // EN: Stop DMD badge cycle / FR: Arrêter cycle badges DMD
-                    _mpvBadgeCycleCts?.Cancel(); // EN: Stop MPV badge cycle / FR: Arrêter cycle badges MPV
-                    _dmdService.ClearOverlay(); // EN: Clear badge ribbon overlay / FR: Effacer overlay bandeau de badges
-                    
-                    // EN: Cleanup composed MPV overlay files / FR: Nettoyer fichiers overlays MPV composés
-                    try
-                    {
-                        string overlayFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "overlays");
-                        if (Directory.Exists(overlayFolder))
-                        {
-                            var composedFiles = Directory.GetFiles(overlayFolder, "composed_mpv_*.png");
-                            foreach (var file in composedFiles)
-                            {
-                                try { File.Delete(file); } catch { }
-                            }
-                            if (composedFiles.Length > 0)
-                            {
-                                _logger.LogInformation($"[RA Cleanup] Deleted {composedFiles.Length} composed overlay files");
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning($"[RA Cleanup] Error cleaning overlay files: {ex.Message}");
-                    }
+                    // EN: Unified cleanup for all overlays and cycles
+                    // FR: Nettoyage unifié pour tous les overlays et cycles
+                    await CleanupAllOverlays();
 
                     // Resume DMD for game or system
                      // EN: Wait for external DMD control (e.g. Pinball FX3) to release before attempting to display
@@ -1116,6 +1153,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                         }
                     }
                     break;
+                case "preview-overlay":
+                    await HandlePreviewOverlay(param1);
+                    break;
             }
         }
 
@@ -1173,12 +1213,15 @@ namespace RetroBatMarqueeManager.Application.Workflows
              if (marqueeFile != null)
              {
                  await _mpv.DisplayImage(marqueeFile, loop: true, token: token);
+                 _currentMarqueePath = marqueeFile; // Store for RP composition and Preview
                  _logger.LogInformation($"Displayed system marquee: {marqueeFile}");
              }
              else
              {
                  _logger.LogWarning($"No system marquee found for {systemName}, using default");
                  await _mpv.DisplayImage(_config.DefaultImagePath, loop: true, token: token);
+                 _currentMarqueePath = _config.DefaultImagePath; // Store default as current
+
              }
         }
 
@@ -1410,7 +1453,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private async Task DisplayDmdGameAsync(string system, string gameName, string romFileName, string romPath, CancellationToken token)
         {
              if (token.IsCancellationRequested) return;
+             if (token.IsCancellationRequested) return;
              var dmdFile = await _marqueeFinder.FindDmdImageAsync(system, gameName, romFileName, romPath, allowVideo: false);
+             _currentDmdPath = dmdFile; // Store for RP composition
              
              if (token.IsCancellationRequested) return;
              
@@ -1444,7 +1489,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private async Task DisplayMpvGameAsync(string system, string gameName, string romFileName, string romPath, CancellationToken token)
         {
              if (token.IsCancellationRequested) return;
+             if (token.IsCancellationRequested) return;
              var marqueeFile = await _marqueeFinder.FindMarqueeFileAsync("game-selected", system, gameName, gameName, romPath);
+             _currentMarqueePath = marqueeFile; // Store for RP composition
 
              if (token.IsCancellationRequested) return;
 
@@ -1488,52 +1535,65 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     _logger.LogWarning($"[RA Workflow] Badge not found: {badgePath}");
                     return;
                 }
+
+                // EN: Get RA Config early for filtering
+                var target = _config.MarqueeRetroAchievementsDisplayTarget; // dmd, mpv, both
+                var mpvNotifications = _config.MpvRetroAchievementsNotifications;
+                var dmdNotifications = _config.DmdRetroAchievementsNotifications;
+                var mpvOverlays = _config.MpvRetroAchievementsOverlays;
+                var dmdOverlays = _config.DmdRetroAchievementsOverlays;
                 
                 // Cup Path logic
                 var cupPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "biggoldencup.png");
                 
-                // EN: Generate MPV Overlay (Badge + Title + Desc + Points) with score
-                // FR: Générer l'overlay MPV (Badge + Titre + Desc + Points) avec score
-                var mpvAchOverlay = _imageService.GenerateMpvAchievementOverlay(badgePath, e.Achievement.Title, e.Achievement.Description, e.Achievement.Points);
+                // EN: Generate MPV Overlay (Badge + Title + Desc + Points) with score if enabled
+                // FR: Générer l'overlay MPV (Badge + Titre + Desc + Points) avec score si activé
+                var mpvAchOverlay = _imageService.GenerateMpvAchievementOverlay(badgePath, e.Achievement.Title, e.Achievement.Description, e.Achievement.Points, e.IsHardcore);
                 if (string.IsNullOrEmpty(mpvAchOverlay)) mpvAchOverlay = badgePath; // Fallback
                 
-                // EN: Compose achievement overlay with score for continuity / FR: Composer overlay achievement avec score pour continuité
+                // EN: Compose achievement overlay with score (and HC status) for continuity if enabled
+                // FR: Composer l'overlay achievement avec score (et statut HC) pour continuité si activé
                 int current = _raService?.CurrentGameUserPoints ?? 0;
                 int total = _raService?.CurrentGameTotalPoints ?? 0;
-                var scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false);
-                var mpvOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, null, 1920, 360);
+                var isHc = _raService?.IsHardcoreMode ?? false;
+                
+                string? scoreOverlay = null;
+                if (mpvOverlays.Contains("score", StringComparison.OrdinalIgnoreCase))
+                {
+                    scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false, isHardcore: isHc);
+                }
+                
+                var mpvOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, null, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: isHc);
                 if (string.IsNullOrEmpty(mpvOverlay)) mpvOverlay = mpvAchOverlay; // Fallback
 
                 // EN: Process Badge and Cup for DMD (Resize/Convert with Ratio)
                 // FR: Traiter le badge et la coupe pour DMD (Redimensionner/Convertir avec Ratio)
-                var dmdBadge = _imageService.ProcessDmdImage(badgePath, "achievements", "badges");
+                var dmdBadge = _imageService.ProcessDmdImage(badgePath, "achievements", "badges", isHardcore: e.IsHardcore);
                 var dmdCup = _imageService.ProcessDmdImage(cupPath, "achievements", "cup"); // Process cup to fix aspect ratio
 
-                var target = _config.MarqueeRetroAchievementsDisplayTarget; // dmd, mpv, both
-                
                 // Execute Notifications in Parallel based on Target
                 var mpvTask = Task.Run(async () =>
                 {
-                    if (target == "dmd") return; // Skip MPV if target is DMD only
+                    if (target == "dmd" || !mpvNotifications) return; // Skip MPV if target is DMD only or notifications disabled
 
                     try
                     {
                         // EN: Stop MPV cycle before notification to avoid showing old overlays
                         // FR: Arrêter cycle MPV avant notification pour éviter afficher anciens overlays
                         _mpvBadgeCycleCts?.Cancel();
+                        await _mpv.RemoveOverlay(3, false); // EN: Hide RP stats / FR: Masquer les stats RP
                         await Task.Delay(100); // Allow cycle to stop
                         
                         // EN: Include count in MPV achievement notification if enabled
                         // FR: Inclure le compteur dans la notification d'achievement MPV si activé
-                        var overlayConfig = _config.MarqueeRetroAchievementsOverlays;
                         string? countOverlay = null;
-                        if (!string.IsNullOrEmpty(overlayConfig) && overlayConfig.Contains("count", StringComparison.OrdinalIgnoreCase))
+                        if (!string.IsNullOrEmpty(mpvOverlays) && mpvOverlays.Contains("count", StringComparison.OrdinalIgnoreCase))
                         {
                             var achievements = _raService?.CurrentGameAchievements;
                             if (achievements != null)
                             {
-                                int unlockedCount = achievements.Values.Count(a => a.Unlocked);
-                                countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false);
+                                int unlockedCount = achievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                                countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false, isHardcore: isHc);
                             }
                         }
 
@@ -1541,25 +1601,23 @@ namespace RetroBatMarqueeManager.Application.Workflows
                         // FR: Re-composer mpvOverlay pour inclure le compteur si disponible
                         if (!string.IsNullOrEmpty(countOverlay))
                         {
-                            var mpvWithCount = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight);
+                            var mpvWithCount = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: isHc);
                             if (!string.IsNullOrEmpty(mpvWithCount)) mpvOverlay = mpvWithCount;
                         }
 
                         // MPV Notification (cup + achievement with score/count)
                         await _mpv.ShowAchievementNotification(cupPath, mpvOverlay, 2000, 8000);
                         
-                        // EN: Refresh overlays with updated scores / FR: Rafraîchir overlays avec scores mis à jour
-                        if (!string.IsNullOrEmpty(overlayConfig))
+                        // EN: Refresh or Restart cycle even for Encore triggers / FR: Rafraîchir ou Redémarrer cycle même pour déclencheurs Encore
+                        if (!string.IsNullOrEmpty(mpvOverlays))
                         {
-                            var activeOverlays = overlayConfig.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                            var activeOverlays = mpvOverlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
                                                          .Select(o => o.Trim());
                             
                             // EN: Get updated scores / FR: Obtenir scores mis à jour
-                            int current = _raService?.CurrentGameUserPoints ?? 0;
-                            int total = _raService?.CurrentGameTotalPoints ?? 0;
+                            int currentScore = _raService?.CurrentGameUserPoints ?? 0;
+                            int totalScore = _raService?.CurrentGameTotalPoints ?? 0;
                             
-                            // EN: Restart MPV badge cycle with updated achievements and scores
-                            // FR: Redémarrer cycle badges MPV avec achievements et scores mis à jour
                             if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
                             {
                                 var achievements = _raService?.CurrentGameAchievements;
@@ -1568,9 +1626,8 @@ namespace RetroBatMarqueeManager.Application.Workflows
                                 {
                                     try
                                     {
-                                        // EN: Restart cycle with updated data / FR: Redémarrer cycle avec données mises à jour
-                                        StartMpvBadgeRibbonCycle(gameId.Value, achievements, current, total);
-                                        _logger.LogInformation($"[RA Workflow] Restarted MPV Badge Ribbon Cycle with updated scores ({current}/{total})");
+                                        StartMpvBadgeRibbonCycle(gameId.Value, achievements, currentScore, totalScore);
+                                        _logger.LogInformation($"[RA Workflow] Restarted MPV Badge Ribbon Cycle after achievement notification");
                                     }
                                     catch (Exception ribbonEx)
                                     {
@@ -1580,8 +1637,6 @@ namespace RetroBatMarqueeManager.Application.Workflows
                             }
                             else
                             {
-                                // EN: If badges are disabled, but score or count are enabled, refresh them
-                                // FR: Si les badges sont désactivés, mais que le score ou le compteur sont activés, les rafraîchir
                                 await RefreshPersistentMpvOverlays();
                             }
                         }
@@ -1594,78 +1649,99 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
                 var dmdTask = Task.Run(async () =>
                 {
-                    if (target == "mpv") return; // Skip DMD if target is MPV only
+                    if (target == "mpv" || !dmdNotifications) return; // Skip DMD if target is MPV only or notifications disabled
 
                     try
                     {
-                        // EN: Stop DMD cycle before notification to avoid conflict
-                        // FR: Arrêter cycle DMD avant notification pour éviter conflit
+                        // EN: Stop DMD cycle and any ongoing RP narration before notification
+                        // FR: Arrêter cycle DMD et toute narration RP en cours avant notification
                         _badgeCycleCts?.Cancel();
+                        _dmdService.ClearOverlay(); // EN: Stop RP Narration immediately / FR: Stopper la narration RP immédiatement
                         await Task.Delay(100); // Allow cycle to stop
 
-                        // DMD Notification (Cup -> Scroll Text -> Badge)
-                        // Use processed dmdCup path
-                        _logger.LogInformation("[RA Workflow] Playing DMD Achievement Sequence (Cup -> Text -> Badge)");
-                        await _dmdService.PlayAchievementSequenceAsync(dmdCup ?? cupPath, dmdBadge ?? string.Empty, e.Achievement.Title, 10000);
-                        
-                        // EN: Show Score Overlay if enabled (Post-Achievement)
-                        // FR: Afficher l'overlay de score si activé (Post-Succès)
-                        var overlays = _config.MarqueeRetroAchievementsOverlays;
-                        if (!string.IsNullOrEmpty(overlays))
+                        // DMD Overlay (ID 4 for Achievement)
+                        // EN: Use new Composite Achievement Overlay for DMD (Badge + Title + Points)
+                        // FR: Utiliser le nouvel overlay composite pour DMD (Badge + Titre + Points)
+                        if (_config.DmdEnabled)
                         {
-                            var activeOverlays = overlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                             // EN: Generate Composite Overlay first
+                             var dmdAchOverlay = _imageService.GenerateDmdAchievementOverlay(
+                                 badgePath, 
+                                 e.Achievement.Title, 
+                                 e.Achievement.Description, 
+                                 e.Achievement.Points, 
+                                 isHc);
+
+                             if (!string.IsNullOrEmpty(dmdAchOverlay) && File.Exists(dmdAchOverlay))
+                             {
+                                 _logger.LogInformation("[RA Workflow] Playing DMD Achievement Sequence (Cup + Composite)");
+                                 await _dmdService.PlayAchievementSequenceAsync(cupPath, dmdAchOverlay, 10000);
+                             }
+                             else
+                             {
+                                  _logger.LogWarning("[RA Workflow] Failed to generate DMD Achievement Overlay. No notification displayed.");
+                             }
+                        }
+                        
+                        // EN: Restart DMD cycle even for Encore triggers / FR: Redémarrer cycle DMD même pour déclencheurs Encore
+                        if (!string.IsNullOrEmpty(dmdOverlays))
+                        {
+                            var activeOverlays = dmdOverlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
                                                          .Select(o => o.Trim());
                             
-                            // EN: Show Count before Score if enabled / FR: Afficher compteur avant score si activé
-                            if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+                            // EN: Show Count/Score before Cycle ONLY IF it's a new unlock AND we didn't just show the composite overlay (optional, but requested behavior implies replacing sequence)
+                            // FR: Afficher Compteur/Score avant Cycle SEULEMENT SI c'est un nouveau déblocage
+                            if (e.IsNewUnlock)
                             {
-                                var achievements = _raService?.CurrentGameAchievements;
-                                if (achievements != null)
+                                // Logic for Count/Score display remains here if needed or skipped if consumed by specific overlay
+                                // For now, we keep Count/Score standard display as 'secondary' notification if enabled
+                                if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
                                 {
-                                    int unlockedCount = achievements.Values.Count(a => a.Unlocked);
-                                    var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: true);
-                                    if (File.Exists(dmdCount))
+                                    var currentAchievements = _raService?.CurrentGameAchievements;
+                                    if (currentAchievements != null)
                                     {
-                                        await _dmdService.SetOverlayAsync(dmdCount, 5000); // Show for 5s
-                                        _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay (Post-Achievement): {dmdCount}");
-                                        await Task.Delay(5000); // Wait for count to finish
+                                        int unlockedCount = currentAchievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                                        var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, currentAchievements.Count, isDmd: true, isHardcore: isHc);
+                                        if (File.Exists(dmdCount))
+                                        {
+                                            await _dmdService.SetOverlayAsync(dmdCount, 5000); 
+                                            _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay (Post-Achievement): {dmdCount}");
+                                            await Task.Delay(5000);
+                                        }
+                                    }
+                                }
+                                
+                                if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+                                {
+                                    int currentVal = _raService?.CurrentGameUserPoints ?? 0;
+                                    int totalVal = _raService?.CurrentGameTotalPoints ?? 0;
+                                    var dmdScore = _imageService.GenerateScoreOverlay(currentVal, totalVal, isDmd: true, isHardcore: _raService?.IsHardcoreMode ?? false);
+                                    if (File.Exists(dmdScore))
+                                    {
+                                        await _dmdService.SetOverlayAsync(dmdScore, 5000);
+                                        _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay (Post-Achievement): {dmdScore}");
+                                        await Task.Delay(5000);
                                     }
                                 }
                             }
-                            
-                            if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+
+                            // EN: Always Restart DMD cycle
+                            // FR: Toujours redémarrer cycle DMD
+                            var achievements = _raService?.CurrentGameAchievements;
+                            var gameId = _raService?.CurrentGameId;
+                            if (achievements != null && gameId != null && gameId > 0 && _raService != null)
                             {
-                                int current = _raService?.CurrentGameUserPoints ?? 0;
-                                int total = _raService?.CurrentGameTotalPoints ?? 0;
-                                var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true);
-                                if (File.Exists(dmdScore))
+                                try
                                 {
-                                    await _dmdService.SetOverlayAsync(dmdScore, 5000); // Show for 5s then clear
-                                    _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay (Post-Achievement): {dmdScore}");
-                                }
-                            }
-                            
-                            // EN: Restart DMD cycle with updated data (Badges/Score/Count)
-                            // FR: Redémarrer cycle DMD avec données mises à jour (Badges/Score/Compteur)
-                            if (!string.IsNullOrEmpty(overlays))
-                            {
-                                var achievements = _raService?.CurrentGameAchievements;
-                                var gameId = _raService?.CurrentGameId;
-                                if (achievements != null && gameId != null && gameId > 0 && _raService != null)
-                                {
-                                    try
+                                    if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
                                     {
-                                        // Wait a bit to ensure clean transition
-                                        await Task.Delay(1000);
-                                        
-                                        // EN: Restart DMD badge cycle with updated achievements
                                         StartBadgeRibbonCycle(gameId.Value, achievements);
-                                        _logger.LogInformation($"[RA Workflow] Restarted DMD Badge Ribbon Cycle (Post-Achievement)");
+                                        _logger.LogInformation($"[RA Workflow] Restarted DMD Badge Ribbon Cycle after achievement notification");
                                     }
-                                    catch (Exception ribbonEx)
-                                    {
-                                        _logger.LogError($"[RA Workflow] Error restarting DMD badge ribbon cycle: {ribbonEx.Message}");
-                                    }
+                                }
+                                catch (Exception ribbonEx)
+                                {
+                                    _logger.LogError($"[RA Workflow] Error restarting DMD badge ribbon cycle: {ribbonEx.Message}");
                                 }
                             }
                         }
@@ -1677,10 +1753,64 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 });
 
                 await Task.WhenAll(mpvTask, dmdTask);
+
+                // EN: Ensure cycles are restarted if notifications were skipped
+                // FR: S'assurer que les cycles redémarrent si les notifications ont été sautées
+                if (_gameRunning && _raService != null && _raService.CurrentGameId.HasValue)
+                {
+                    var achievements = _raService.CurrentGameAchievements;
+                    if (achievements != null && achievements.Count > 0)
+                    {
+                        // MPV Refresh/Restart if notification was off
+                        if (!mpvNotifications && !string.IsNullOrEmpty(mpvOverlays))
+                        {
+                             if (mpvOverlays.Contains("badges", StringComparison.OrdinalIgnoreCase))
+                                 StartMpvBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements, _raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints);
+                             else
+                                 await RefreshPersistentMpvOverlays();
+                        }
+
+                        // DMD Restart/Refresh if notification was off
+                        if (!dmdNotifications && !string.IsNullOrEmpty(dmdOverlays))
+                        {
+                            var activeDmdOverlays = dmdOverlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(o => o.Trim());
+                            if (activeDmdOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
+                            {
+                                StartBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements);
+                            }
+                            else
+                            {
+                                // EN: Manual one-shot refresh for DMD (Count/Score)
+                                // FR: Rafraîchissement manuel unique pour DMD (Compteur/Score)
+                                if (activeDmdOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+                                {
+                                    int unlocked = achievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                                    var dmdCount = _imageService.GenerateAchievementCountOverlay(unlocked, achievements.Count, isDmd: true, isHardcore: isHc);
+                                    if (File.Exists(dmdCount))
+                                    {
+                                        await _dmdService.SetOverlayAsync(dmdCount, 5000);
+                                        await Task.Delay(5000); // Wait before potential score
+                                    }
+                                }
+                                if (activeDmdOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+                                {
+                                    var dmdScore = _imageService.GenerateScoreOverlay(_raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints, isDmd: true, isHardcore: isHc);
+                                    if (File.Exists(dmdScore)) await _dmdService.SetOverlayAsync(dmdScore, 5000);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogError($"[RA Workflow] Error displaying achievement: {ex.Message}");
+            }
+            finally
+            {
+                 // EN: Restore RP updates
+                 // FR: Restaurer les mises à jour RP
+                 _isProcessingAchievement = false;
             }
         }
         
@@ -1688,55 +1818,147 @@ namespace RetroBatMarqueeManager.Application.Workflows
         /// EN: Handle game started event - Log game info
         /// FR: Gérer événement jeu démarré - Logger infos jeu
         /// </summary>
+        private async void OnHardcoreStatusChanged(object? sender, bool isHardcore)
+        {
+            try
+            {
+                _logger.LogInformation($"[RA Workflow] Hardcore Mode Changed: {isHardcore}. Refreshing overlays...");
+                
+                // EN: If status changes during a game, we must refresh persistent overlays to update "HC" labels
+                // FR: Si le statut change pendant un jeu, on doit rafraîchir les overlays persistants pour mettre à jour les labels "HC"
+                if (_gameRunning)
+                {
+                    // EN: Unified cleanup before refresh
+                    await CleanupAllOverlays();
+
+                    var target = _config.MarqueeRetroAchievementsDisplayTarget;
+                    var mpvOverlaysStr = _config.MpvRetroAchievementsOverlays;
+                    var dmdOverlaysStr = _config.DmdRetroAchievementsOverlays;
+
+                    // EN: Refresh persistent MPV overlays
+                    // FR: Rafraîchir overlays MPV persistants
+                    if (target != "dmd" && !string.IsNullOrWhiteSpace(mpvOverlaysStr))
+                    {
+                        await RefreshPersistentMpvOverlays();
+                    }
+                    
+                    // EN: Restart cycles if active
+                    if (_raService != null && _raService.CurrentGameId.HasValue)
+                    {
+                        var achievements = _raService.CurrentGameAchievements;
+                        if (achievements != null && achievements.Count > 0)
+                        {
+                            if (target != "dmd" && mpvOverlaysStr.Contains("badges", StringComparison.OrdinalIgnoreCase))
+                            {
+                                int current = _raService.CurrentGameUserPoints;
+                                int total = _raService.CurrentGameTotalPoints;
+                                StartMpvBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements, current, total);
+                            }
+                            
+                            if (target != "mpv" && !string.IsNullOrWhiteSpace(dmdOverlaysStr))
+                            {
+                                if (dmdOverlaysStr.Contains("badges", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    StartBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements);
+                                }
+                                else
+                                {
+                                    // EN: One-shot refresh for DMD if no badges
+                                    // FR: Rafraîchissement unique pour DMD si pas de badges
+                                    if (dmdOverlaysStr.Contains("count", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        var isHc = _raService.IsHardcoreMode;
+                                        int unlockedCount = achievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                                        var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: true, isHardcore: isHc);
+                                        if (File.Exists(dmdCount)) await _dmdService.SetOverlayAsync(dmdCount, 5000);
+                                    }
+                                    if (dmdOverlaysStr.Contains("score", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                         var dmdScore = _imageService.GenerateScoreOverlay(_raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints, isDmd: true, isHardcore: _raService.IsHardcoreMode);
+                                         if (File.Exists(dmdScore)) await _dmdService.SetOverlayAsync(dmdScore, 5000);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[MarqueeWorkflow] Error handling Hardcore status change: {ex.Message}");
+            }
+        }
+
         private async void OnGameStarted(object? sender, GameStartedEventArgs e)
         {
+            _lastRpState = null; // EN: Reset RP state / FR: Réinitialiser l'état RP
             try
             {
                 var gameTitle = e.GameInfo?.Title ?? $"Game ID {e.GameId}";
                 var completion = e.UserProgress?.UserCompletion ?? "0%";
                 _logger.LogInformation($"[RA Workflow] Game Started: {gameTitle} - {completion} complete");
-                
+
+                // EN: Purge old Hardcore overlays to prevent accumulation
+                // FR: Purger les anciens overlays Hardcore pour éviter l'accumulation
+                _imageService.PurgeHardcoreOverlays();
+                _imageService.PurgeSoftcoreOverlays(); // Added softcore purge as requested
+
+                // EN: Ensure clean slate on game start
+                // FR: Garantir un état propre au démarrage du jeu
+                await CleanupAllOverlays();
                 // EN: Check if Overlays are enabled
                 // FR: Vérifier si les overlays sont activés
-                var overlays = _config.MarqueeRetroAchievementsOverlays;
-                if (!string.IsNullOrEmpty(overlays))
+                var target = _config.MarqueeRetroAchievementsDisplayTarget;
+                var mpvOverlaysStr = _config.MpvRetroAchievementsOverlays;
+                var dmdOverlaysStr = _config.DmdRetroAchievementsOverlays;
+
+                _logger.LogInformation($"[RA Workflow] Overlays Config - MPV: '{mpvOverlaysStr}', DMD: '{dmdOverlaysStr}', Target: {target}");
+
+                if (string.IsNullOrEmpty(mpvOverlaysStr) && string.IsNullOrEmpty(dmdOverlaysStr))
                 {
-                    var activeOverlays = overlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                                                 .Select(o => o.Trim());
+                    _logger.LogInformation("[RA Workflow] No overlays enabled for MPV or DMD. Skipping.");
+                    return;
+                }
 
-                    // EN: Check if game has achievements
-                    // FR: Vérifier si le jeu a des succès
-                    if (e.UserProgress?.Achievements == null || e.UserProgress.Achievements.Count == 0)
-                    {
-                        _logger.LogInformation($"[RA Workflow] Game '{gameTitle}' has no achievements. Skipping Overlays.");
-                        return;
-                    }
+                // Split into lists for easier checking
+                var mpvOverlays = mpvOverlaysStr.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(o => o.Trim()).ToList();
+                var dmdOverlays = dmdOverlaysStr.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(o => o.Trim()).ToList();
 
-                    // EN: Use unified helper for MPV persistent overlays (Score, Count)
-                    // FR: Utiliser le helper unifié pour les overlays persistants MPV (Score, Compteur)
-                    // Check Target: Only if MPV or BOTH
-                    // Check Target: Only if MPV or BOTH
-                    var target = _config.MarqueeRetroAchievementsDisplayTarget;
-                    _logger.LogInformation($"[RA Workflow] Display Target: {target}");
-                    
-                    if (target != "dmd")
+                // EN: Check if game has achievements
+                // FR: Vérifier si le jeu a des succès
+                if (e.UserProgress?.Achievements == null || e.UserProgress.Achievements.Count == 0)
+                {
+                    _logger.LogInformation($"[RA Workflow] Game '{gameTitle}' has no achievements. Skipping Overlays.");
+                    return;
+                }
+
+                _logger.LogInformation($"[RA Workflow] Display Target: {target}");
+                
+                // EN: Refresh persistent MPV overlays (Score, Count)
+                // FR: Rafraîchir les overlays persistants MPV (Score, Compteur)
+                if (target != "dmd" && mpvOverlays.Any())
+                {
+                    await RefreshPersistentMpvOverlays();
+                }
+                
+                // EN: DMD - Show initial sequence (count and score) if enabled
+                // FR: DMD - Afficher la séquence initiale (compteur et score) si activé
+                if (target != "mpv" && dmdOverlays.Any())
+                {
+                    if (dmdOverlays.Contains("count", StringComparer.OrdinalIgnoreCase) || dmdOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
                     {
-                        await RefreshPersistentMpvOverlays();
-                    }
-                    
-                    // EN: DMD - Show count and score if enabled / FR: DMD - Afficher compteur et score si activé
-                    if (target != "mpv")
-                    {
-                        if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase) || activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
-                        {
-                            int current = _raService?.CurrentGameUserPoints ?? 0;
-                            int total = _raService?.CurrentGameTotalPoints ?? 0;
-                            var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true);
+                        if (_raService == null) return;
+            
+                        int current = _raService.CurrentGameUserPoints;
+                        int total = _raService.CurrentGameTotalPoints;
+            
+            // Note: dmdScore generation moved inside specific block to ensure latest state
     
-                            if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+                            if (dmdOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
                             {
-                                int unlockedCount = e.UserProgress.Achievements.Values.Count(a => a.Unlocked);
-                                var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, e.UserProgress.Achievements.Count, isDmd: true);
+                                var isHardcore = _raService?.IsHardcoreMode ?? false;
+                                int unlockedCount = e.UserProgress.Achievements.Values.Count(a => isHardcore ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                                var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, e.UserProgress.Achievements.Count, isDmd: true, isHardcore: isHardcore);
                                 if (File.Exists(dmdCount))
                                 {
                                     if (!_gameRunning) return; // Prevent if game stopped
@@ -1748,63 +1970,67 @@ namespace RetroBatMarqueeManager.Application.Workflows
                                 }
                             }
                             
-                            if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase) && File.Exists(dmdScore))
+                            if (dmdOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
                             {
                                 if (!_gameRunning) return;
-                                // DMD: Show for 5 seconds
+
+                                // EN: Generate score overlay immediately before use for latest Hardcore status
+                                // FR: Générer score overlay immédiatement avant usage pour dernier statut Hardcore
+                                var isHardcore = _raService?.IsHardcoreMode ?? false;
+                                var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true, isHardcore: isHardcore);
+                                
                                 await _dmdService.SetOverlayAsync(dmdScore, 5000);
                                 _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay: {dmdScore}");
+                                await Task.Delay(5000); // EN: Wait before potential badge ribbon / FR: Attendre avant éventuel cycle de badges
                             }
                         }
                     }
 
                     // EN: Badge Ribbon Overlay / FR: Overlay de bandeau de badges
-                    if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
+                    bool showMpvBadges = (target != "dmd") && mpvOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase);
+                    bool showDmdBadges = (target != "mpv") && dmdOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase);
+
+                    if (showMpvBadges || showDmdBadges)
                     {
                         // EN: Check if game has achievements / FR: Vérifier si le jeu a des succès
-                        if (e.UserProgress?.Achievements == null || e.UserProgress.Achievements.Count == 0)
+                        if (e.UserProgress?.Achievements != null && e.UserProgress.Achievements.Count > 0)
                         {
-                            _logger.LogInformation($"[RA Workflow] Game '{gameTitle}' has no achievements. Skipping Badge Ribbon.");
-                        }
-                        else if (_raService != null && e.GameId > 0)
-                        {
-                            // Generate badge ribbon overlays
-                            try
+                            if (_raService != null && e.GameId > 0)
                             {
-                                var mpvBadgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
-                                    e.UserProgress.Achievements, e.GameId, _raService, isDmd: false);
-                                var dmdBadgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
-                                    e.UserProgress.Achievements, e.GameId, _raService!, isDmd: true);
+                                // Generate badge ribbon overlays
+                                try
+                                {
+                                    var isHardcore = _raService.IsHardcoreMode;
                                     
-                                if (!string.IsNullOrEmpty(mpvBadgeRibbon) && File.Exists(mpvBadgeRibbon))
-                                {
-                                    // MPV: Start cycling with score composition (only if not DMD-only)
-                                    if (target != "dmd")
+                                    if (showMpvBadges)
                                     {
-                                        int current = _raService?.CurrentGameUserPoints ?? 0;
-                                        int total = _raService?.CurrentGameTotalPoints ?? 0;
-                                        StartMpvBadgeRibbonCycle(e.GameId, e.UserProgress.Achievements, current, total);
-                                        _logger.LogInformation($"[RA Workflow] Started MPV Badge Ribbon Cycle with Score");
+                                        var mpvBadgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
+                                            e.UserProgress.Achievements, e.GameId, _raService, isDmd: false, isHardcore: isHardcore);
+                                            
+                                        if (!string.IsNullOrEmpty(mpvBadgeRibbon) && File.Exists(mpvBadgeRibbon))
+                                        {
+                                            int currentScore = _raService?.CurrentGameUserPoints ?? 0;
+                                            int totalScore = _raService?.CurrentGameTotalPoints ?? 0;
+                                            StartMpvBadgeRibbonCycle(e.GameId, e.UserProgress.Achievements, currentScore, totalScore);
+                                            _logger.LogInformation($"[RA Workflow] Started MPV Badge Ribbon Cycle");
+                                        }
                                     }
-                                }
-                                
-                                if (!string.IsNullOrEmpty(dmdBadgeRibbon) && File.Exists(dmdBadgeRibbon))
-                                {
-                                    if (target != "mpv")
+                                    
+                                    // EN: Start DMD cycle if badges are enabled
+                                    // FR: Démarrer cycle DMD si les badges sont activés
+                                    if (target != "mpv" && dmdOverlaysStr.Contains("badges", StringComparison.OrdinalIgnoreCase))
                                     {
-                                        // DMD: Start cycling through badge groups
                                         StartBadgeRibbonCycle(e.GameId, e.UserProgress.Achievements);
                                         _logger.LogInformation($"[RA Workflow] Started DMD Badge Ribbon Cycle");
                                     }
                                 }
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError($"[RA Workflow] Error displaying badge ribbon: {ex.Message}");
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError($"[RA Workflow] Error initializing RA cycles: {ex.Message}");
+                                }
                             }
                         }
                     }
-                }
             }
             catch (Exception ex)
             {
@@ -1820,7 +2046,8 @@ namespace RetroBatMarqueeManager.Application.Workflows
         {
             if (_raService == null || _imageService == null || _mpv == null) return;
 
-            var overlays = _config.MarqueeRetroAchievementsOverlays;
+            var overlays = _config.MpvRetroAchievementsOverlays;
+            _logger.LogInformation($"[RA Workflow] Refreshing persistent MPV overlays with config: '{overlays}'");
             if (string.IsNullOrEmpty(overlays)) return;
 
             var activeOverlays = overlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
@@ -1833,7 +2060,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
             {
                 int current = _raService.CurrentGameUserPoints;
                 int total = _raService.CurrentGameTotalPoints;
-                scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false);
+                scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false, isHardcore: _raService.IsHardcoreMode);
             }
 
             if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
@@ -1841,8 +2068,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 var achievements = _raService.CurrentGameAchievements;
                 if (achievements != null)
                 {
-                    int unlockedCount = achievements.Values.Count(a => a.Unlocked);
-                    countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false);
+                    var isHardcore = _raService.IsHardcoreMode;
+                    int unlockedCount = achievements.Values.Count(a => isHardcore ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                    countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false, isHardcore: isHardcore);
                 }
             }
 
@@ -1850,12 +2078,13 @@ namespace RetroBatMarqueeManager.Application.Workflows
             {
                 // EN: Compose them into a single overlay (badges Ribbon is handled separately by the cycle)
                 // FR: Les composer en un seul overlay (le bandeau des badges est géré séparément par le cycle)
-                var composed = _imageService.ComposeScoreAndBadges(scoreOverlay, null, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight);
+                var composed = _imageService.ComposeScoreAndBadges(scoreOverlay, null, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: _raService.IsHardcoreMode);
                 if (!string.IsNullOrEmpty(composed) && File.Exists(composed))
                 {
                     if (!_gameRunning) return; // Prevent race condition if game ended
-                    // EN: Show indefinitely (1h) until next update
-                    await _mpv.ShowOverlay(composed, 3600000, "top-left");
+                    // EN: Show indefinitely (1h) on persistent slot 1
+                    // FR: Afficher indéfiniment (1h) sur le slot persistant 1
+                    await _mpv.OverlayImage(composed, 1, "top-left");
                     _logger.LogInformation($"[RA Workflow] Refreshed persistent MPV overlays: {Path.GetFileName(composed)}");
                 }
             }
@@ -1878,12 +2107,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
             {
                 try
                 {
-                    // EN: Calculate max badges per frame based on Screen Width and Badge Size
-                    // FR: Calculer badges max par frame selon Largeur Écran et Taille Badge
-                    // Logic from ImageConversionService: BadgeSize = Height / 7.2 (Revised Phase 10)
-                    int badgeSize = (int)(_config.MarqueeHeight / 7.2);
-                    int spacing = 1;
-                    int maxBadgesPerFrame = Math.Max(1, _config.MarqueeWidth / (badgeSize + spacing));
+                    // EN: Calculate max badges per frame based on template (Ribbon Width and Ribbon Height)
+                    // FR: Calculer badges max par frame selon le template (Largeur et Hauteur du Ruban)
+                    var (badgeSize, maxBadgesPerFrame) = _imageService.GetBadgeRibbonCapacity(isDmd: false);
                     
                     // EN: Group achievements by calculated max / FR: Grouper achievements par max calculé
                     var sortedAchievements = achievements.Values.OrderBy(a => a.DisplayOrder).ToList();
@@ -1897,11 +2123,12 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     
                     // EN: Generate count overlay if enabled / FR: Générer overlay compteur si activé
                     string? countOverlay = null;
-                    var overlayConfig = _config.MarqueeRetroAchievementsOverlays;
+                    var overlayConfig = _config.MpvRetroAchievementsOverlays;
                     if (!string.IsNullOrEmpty(overlayConfig) && overlayConfig.Contains("count", StringComparison.OrdinalIgnoreCase))
                     {
-                        int unlockedCount = achievements.Values.Count(a => a.Unlocked);
-                        countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false);
+                        var isHardcore = _raService?.IsHardcoreMode ?? false;
+                        int unlockedCount = achievements.Values.Count(a => isHardcore ? a.DateEarnedHardcore.HasValue : a.Unlocked);
+                        countOverlay = _imageService.GenerateAchievementCountOverlay(unlockedCount, achievements.Count, isDmd: false, isHardcore: isHardcore);
                     }
                     
                     // EN: Pre-generate all composed overlays once to avoid file accumulation
@@ -1912,15 +2139,15 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     {
                         var groupDict = group.ToDictionary(a => a.ID.ToString(), a => a);
                         var badgeRibbon = await _imageService.GenerateBadgeRibbonOverlay(
-                            groupDict, gameId, _raService!, isDmd: false);
+                            groupDict, gameId, _raService!, isDmd: false, isHardcore: _raService?.IsHardcoreMode ?? false);
                         
                         string? scoreOverlay = null;
                         if (overlayConfig.Contains("score", StringComparison.OrdinalIgnoreCase))
                         {
-                            scoreOverlay = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false);
+                            scoreOverlay = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false, isHardcore: _raService?.IsHardcoreMode ?? false);
                         }
                         
-                        var composedOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, badgeRibbon, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight);
+                        var composedOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, badgeRibbon, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: _raService?.IsHardcoreMode ?? false);
                         
                         if (!string.IsNullOrEmpty(composedOverlay))
                         {
@@ -1932,10 +2159,10 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     string? scoreOnly = null;
                     if (overlayConfig.Contains("score", StringComparison.OrdinalIgnoreCase))
                     {
-                        scoreOnly = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false);
+                        scoreOnly = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false, isHardcore: _raService?.IsHardcoreMode ?? false);
                     }
                     
-                    var composedScoreOnly = _imageService.ComposeScoreAndBadges(scoreOnly, null, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight);
+                    var composedScoreOnly = _imageService.ComposeScoreAndBadges(scoreOnly, null, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: _raService?.IsHardcoreMode ?? false);
                     
                     _logger.LogInformation($"[RA MPV Cycle] Pre-generated {composedOverlays.Count} composed overlays");
                     
@@ -1947,9 +2174,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                          
                          if (File.Exists(overlayToShow))
                          {
-                             // EN: Show for a very long duration (effectively static until next event)
-                             // FR: Afficher pour une très longue durée (effectivement statique jusqu'au prochain événement)
-                             await _mpv.ShowOverlay(overlayToShow, 3600000, "top-left"); // 1 hour
+                             // EN: Show for a very long duration on persistent slot 1
+                             // FR: Afficher pour une très longue durée sur le slot persistant 1
+                             await _mpv.OverlayImage(overlayToShow, 1, "top-left");
                              _logger.LogInformation($"[RA MPV Cycle] Single page detected. Showing static overlay: {overlayToShow}");
                          }
                          return; // EXIT LOOP
@@ -1964,8 +2191,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                             
                             if (File.Exists(overlay))
                             {
-                                // EN: Duration slightly longer than delay to prevent "flicker" between overlays
-                                await _mpv.ShowOverlay(overlay, 5500, "top-left");
+                                // EN: Use persistent slot 1 for cycle updates
+                                // FR: Utiliser le slot persistant 1 pour les mises à jour du cycle
+                                await _mpv.OverlayImage(overlay, 1, "top-left");
                                 _logger.LogDebug($"[RA MPV Cycle] Showing overlay: {Path.GetFileName(overlay)}");
                             }
                             
@@ -1975,8 +2203,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                         // EN: During pause, show score-only / FR: Pendant la pause, afficher score seul
                         if (!string.IsNullOrEmpty(composedScoreOnly) && File.Exists(composedScoreOnly))
                         {
-                             // EN: Duration slightly longer than delay
-                            await _mpv.ShowOverlay(composedScoreOnly, 2500, "top-left");
+                             // EN: Show score-only on persistent slot 1
+                             // FR: Afficher score seul sur le slot persistant 1
+                            await _mpv.OverlayImage(composedScoreOnly, 1, "top-left");
                         }
                         
                         await Task.Delay(2000, token);
@@ -2014,6 +2243,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
         /// </summary>
         private void StartBadgeRibbonCycle(int gameId, Dictionary<string, Achievement> achievements)
         {
+            // EN: No longer skipping if timer active, as we now support composition
+            // FR: On ne saute plus si un timer est actif, car on supporte maintenant la composition
+
             _badgeCycleCts?.Cancel();
             _badgeCycleCts?.Dispose();
             _badgeCycleCts = new CancellationTokenSource();
@@ -2025,22 +2257,23 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 try
                 {
                     // EN: Check what to show
-                    var overlayConfig = _config.MarqueeRetroAchievementsOverlays; // score,badges,count
+                    var overlayConfig = _config.DmdRetroAchievementsOverlays; // score,badges,count
                     var showBadges = overlayConfig.Contains("badges", StringComparison.OrdinalIgnoreCase);
                     var showScore = overlayConfig.Contains("score", StringComparison.OrdinalIgnoreCase);
                     var showCount = overlayConfig.Contains("count", StringComparison.OrdinalIgnoreCase);
 
-                    // EN: Group achievements by 4 (if badges enabled)
+                    // EN: Group achievements by calculated capacity (if badges enabled)
                     List<List<Achievement>> groups = new List<List<Achievement>>();
                     if (showBadges && achievements != null && achievements.Count > 0)
                     {
+                         var (badgeSize, maxBadgesPerFrame) = _imageService.GetBadgeRibbonCapacity(isDmd: true);
                          var sortedAchievements = achievements.Values.OrderBy(a => a.DisplayOrder).ToList();
                          groups = sortedAchievements
                             .Select((a, i) => new { Achievement = a, Index = i })
-                            .GroupBy(x => x.Index / 4)
+                            .GroupBy(x => x.Index / maxBadgesPerFrame)
                             .Select(g => g.Select(x => x.Achievement).ToList())
                             .ToList();
-                         _logger.LogInformation($"[RA Badge Cycle] Created {groups.Count} groups of ~4 badges");
+                         _logger.LogInformation($"[RA Badge Cycle] Created {groups.Count} groups of ~{maxBadgesPerFrame} badges");
                     }
 
                     // EN: Delay initial start if we just showed post-unlock overlays
@@ -2057,12 +2290,20 @@ namespace RetroBatMarqueeManager.Application.Workflows
                                 if (token.IsCancellationRequested) break;
                                 
                                 var groupDict = group.ToDictionary(a => a.ID.ToString(), a => a);
+                                var isHardcore = _raService?.IsHardcoreMode ?? false;
                                 var ribbonPath = await _imageService.GenerateBadgeRibbonOverlay(
-                                    groupDict, gameId, _raService!, isDmd: true);
+                                    groupDict, gameId, _raService!, isDmd: true, isHardcore: isHardcore);
                                 
-                                if (!string.IsNullOrEmpty(ribbonPath) && File.Exists(ribbonPath))
+                                 if (!string.IsNullOrEmpty(ribbonPath) && File.Exists(ribbonPath))
                                 {
-                                    await _dmdService.SetOverlayAsync(ribbonPath, 5000);
+                                    _currentDmdRibbonPath = ribbonPath; // Store for composition
+                                    
+                                    // EN: Only set direct overlay if NO challenges are active
+                                    // FR: N'afficher l'overlay direct que si AUCUN défi n'est actif
+                                    if (_activeChallenges.Values.All(c => !c.IsActive))
+                                    {
+                                        await _dmdService.SetOverlayAsync(ribbonPath, 5000);
+                                    }
                                     await Task.Delay(5000, token);
                                 }
                             }
@@ -2075,9 +2316,10 @@ namespace RetroBatMarqueeManager.Application.Workflows
                              var currentAchievements = _raService?.CurrentGameAchievements;
                              if (currentAchievements != null)
                              {
-                                 int unlocked = currentAchievements.Values.Count(a => a.Unlocked);
+                                 var isHardcore = _raService?.IsHardcoreMode ?? false;
+                                 int unlocked = currentAchievements.Values.Count(a => isHardcore ? a.DateEarnedHardcore.HasValue : a.Unlocked);
                                  int total = currentAchievements.Count;
-                                 var dmdCount = _imageService.GenerateAchievementCountOverlay(unlocked, total, isDmd: true);
+                                 var dmdCount = _imageService.GenerateAchievementCountOverlay(unlocked, total, isDmd: true, isHardcore: isHardcore);
                                  if (File.Exists(dmdCount))
                                  {
                                      await _dmdService.SetOverlayAsync(dmdCount, 4000);
@@ -2092,7 +2334,8 @@ namespace RetroBatMarqueeManager.Application.Workflows
                             // Refresh data
                             int current = _raService?.CurrentGameUserPoints ?? 0;
                             int total = _raService?.CurrentGameTotalPoints ?? 0;
-                            var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true);
+                            var isHardcore = _raService?.IsHardcoreMode ?? false;
+                            var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true, isHardcore: isHardcore);
                             if (File.Exists(dmdScore))
                             {
                                 await _dmdService.SetOverlayAsync(dmdScore, 4000);
@@ -2124,18 +2367,889 @@ namespace RetroBatMarqueeManager.Application.Workflows
             }, token);
         }
 
+        private async void OnChallengeUpdated(object? sender, ChallengeUpdatedEventArgs e)
+        {
+            if (!_gameRunning) return;
+            
+            try
+            {
+                // EN: Check config
+                var mpvConfig = _config.MpvRetroAchievementsOverlays;
+                var dmdConfig = _config.DmdRetroAchievementsOverlays;
+                
+                bool showOnMpv = mpvConfig.Contains("challenge", StringComparison.OrdinalIgnoreCase) || mpvConfig.Contains("all", StringComparison.OrdinalIgnoreCase);
+                bool showOnDmd = dmdConfig.Contains("challenge", StringComparison.OrdinalIgnoreCase) || dmdConfig.Contains("all", StringComparison.OrdinalIgnoreCase);
+
+                if (!showOnMpv && !showOnDmd)
+                {
+                    _activeChallenges.TryRemove(e.State.AchievementId, out _);
+                    StopChallengeRefresh(e.State.AchievementId);
+                    return;
+                }
+
+                // Update internal collection
+                if (e.State.IsActive)
+                    _activeChallenges[e.State.AchievementId] = e.State;
+                else
+                    _activeChallenges.TryRemove(e.State.AchievementId, out _);
+
+                // MPV Overlay (ID 5 for Challenges)
+                if (_config.IsMpvEnabled && showOnMpv)
+                {
+                    if (e.State.IsActive)
+                    {
+                        // EN: If it's a timer, the cycle will handle the refresh
+                        // FR: Si c'est un timer, le cycle gérera le rafraîchissement
+                    }
+                    else
+                    {
+                         // Removed from active, cycle will pick it up on next iteration or cleaner will handle it
+                         // If no more challenges for MPV, clear overlay
+                         if (!_activeChallenges.Values.Any(c => c.IsActive)) // Check if any active left
+                         {
+                             _mpvChallengeCycleCts?.Cancel();
+                             await _mpv.RemoveOverlay(5);
+                         }
+                    }
+                    
+                    // EN: Always ensure cycle is running if there are active challenges
+                    if (!_activeChallenges.IsEmpty && (_mpvChallengeCycleCts == null || _mpvChallengeCycleCts.IsCancellationRequested))
+                    {
+                        StartMpvChallengeCycle();
+                    }
+                }
+                else if (_config.IsMpvEnabled && !showOnMpv)
+                {
+                    // Ensure it's cleared if it was shown before config change
+                    _mpvChallengeCycleCts?.Cancel();
+                    await _mpv.RemoveOverlay(5);
+                }
+
+                // DMD Overlay
+                if (_config.DmdEnabled && showOnDmd)
+                {
+                    // EN: If any active challenges, ensure cycle is running
+                    // FR: Si des défis sont actifs, s'assurer que le cycle tourne
+                    if (!_activeChallenges.IsEmpty)
+                    {
+                        // EN: If it's a new Timer, we must immediately interrupt existing Badge Ribbons
+                        // FR: Si c'est un nouveau Timer, on doit interrompre immédiatement les ribbons de badges
+                        if (e.State.IsActive && e.State.Type == ChallengeType.Timer)
+                        {
+                            // _badgeCycleCts?.Cancel(); // No longer cancelling badge cycle, we compose now
+                        }
+                        
+                        StartDmdChallengeCycle();
+                    }
+                    else
+                    {
+                        _dmdChallengeCycleCts?.Cancel();
+                        _dmdService.ClearOverlay();
+                        _currentDmdRibbonPath = null; // Clear ribbon track if challenges gone? Or keep last?
+                                                      // Actually, if challenges gone, Resume Badge Cycle will handle it.
+
+                        // EN: If no more challenges, check if we should resume badge ribbons
+                        // FR: Si plus de défis, vérifier si on doit reprendre les ribbons de badges
+                        var currentAchievements = _raService?.CurrentGameAchievements;
+                        if (currentAchievements != null && currentAchievements.Count > 0)
+                        {
+                            StartBadgeRibbonCycle(_raService!.CurrentGameId ?? 0, currentAchievements);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[MarqueeWorkflow] Error handling Challenge update: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// EN: Start DMD challenge cycling (alternating between all active challenges)
+        /// FR: Démarrer cycle de défis DMD (alternance entre tous les défis actifs)
+        /// </summary>
+        private void StartDmdChallengeCycle()
+        {
+            if (_dmdChallengeCycleCts != null && !_dmdChallengeCycleCts.IsCancellationRequested) return;
+
+            _dmdChallengeCycleCts?.Cancel();
+            _dmdChallengeCycleCts?.Dispose();
+            _dmdChallengeCycleCts = new CancellationTokenSource();
+            var token = _dmdChallengeCycleCts.Token;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!token.IsCancellationRequested && !_activeChallenges.IsEmpty && _gameRunning)
+                    {
+                        // EN: Get a snapshot of active challenges
+                        // FR: Prendre une capture des défis actifs
+                        var challenges = _activeChallenges.Values.ToList();
+                        
+                        var isHardcore = _raService?.IsHardcoreMode ?? false;
+                        
+                        foreach (var challenge in challenges)
+                        {
+                            if (token.IsCancellationRequested) break;
+
+                            // EN: Special case: if it's a timer or leaderboard, we refresh more often (1s)
+                            // FR: Cas spécial : si c'est un timer ou leaderboard, on rafraîchit à chaque seconde
+                            if (challenge.Type == ChallengeType.Timer || challenge.Type == ChallengeType.Leaderboard)
+                            {
+                                int timerDuration = 5; // Show for 5 seconds but update every 1s
+                                for (int i = 0; i < timerDuration; i++)
+                                {
+                                    if (token.IsCancellationRequested || !challenge.IsActive) break;
+                                    // EN: Pass the current ribbon path if available for composite rendering
+                                    // FR: Passer le chemin du ruban actuel si disponible pour le rendu composite
+                                    await _dmdService.PlayChallengeNotificationAsync(challenge, isHardcore, _currentDmdRibbonPath);
+                                    await Task.Delay(1000, token);
+                                }
+                            }
+                            else
+                            {
+                                // EN: Progress / Other
+                                // FR: Progrès / Autre
+                                await _dmdService.PlayChallengeNotificationAsync(challenge, isHardcore, _currentDmdRibbonPath);
+                                await Task.Delay(5000, token);
+                            }
+                        }
+                    }
+                }
+                catch (TaskCanceledException) { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[RA DMD Challenge Cycle] Error: {ex.Message}");
+                }
+                finally
+                {
+                    _dmdChallengeCycleCts = null;
+                }
+            }, token);
+        }
+
+        /// <summary>
+        /// EN: Start MPV challenge cycling (alternating between all active challenges)
+        /// FR: Démarrer cycle de défis MPV (alternance entre tous les défis actifs)
+        /// </summary>
+        private void StartMpvChallengeCycle()
+        {
+            if (_mpvChallengeCycleCts != null && !_mpvChallengeCycleCts.IsCancellationRequested) return;
+
+            _mpvChallengeCycleCts?.Cancel();
+            _mpvChallengeCycleCts?.Dispose();
+            _mpvChallengeCycleCts = new CancellationTokenSource();
+            var token = _mpvChallengeCycleCts.Token;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!token.IsCancellationRequested && !_activeChallenges.IsEmpty && _gameRunning)
+                    {
+                        // EN: Get a snapshot of active challenges (Keys only to re-fetch fresh state)
+                        // FR: Prendre une capture des défis actifs (Clés seulement pour récupérer état frais)
+                        var challengeIds = _activeChallenges.Keys.ToList();
+
+                        if (challengeIds.Count == 0) break;
+
+                        foreach (var id in challengeIds)
+                        {
+                            if (token.IsCancellationRequested) break;
+
+                            // EN: Re-fetch string-fresh state
+                            if (!_activeChallenges.TryGetValue(id, out var challenge) || !challenge.IsActive) continue;
+
+                            // EN: Special case: if it's a timer or leaderboard, we refresh more often (1s)
+                            if (challenge.Type == ChallengeType.Timer || challenge.Type == ChallengeType.Leaderboard)
+                            {
+                                int timerDuration = 5; // Show for 5 seconds but update every 1s
+                                for (int i = 0; i < timerDuration; i++)
+                                {
+                                    if (token.IsCancellationRequested) break;
+                                    
+                                    // Refresh state again directly from dictionary for live timer updates
+                                    if (_activeChallenges.TryGetValue(id, out var liveChallenge) && liveChallenge.IsActive)
+                                    {
+                                        await RefreshChallengeMpvOverlay(liveChallenge);
+                                    }
+                                    else break; // Challenge gone
+
+                                    await Task.Delay(1000, token);
+                                }
+                            }
+                            else
+                            {
+                                // EN: Progress / Other
+                                await RefreshChallengeMpvOverlay(challenge);
+                                await Task.Delay(5000, token);
+                            }
+                        }
+                    }
+                    
+                    // Cleanup when empty
+                    if (!token.IsCancellationRequested) await _mpv.RemoveOverlay(5);
+                }
+                catch (TaskCanceledException) { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[RA MPV Challenge Cycle] Error: {ex.Message}");
+                }
+                finally
+                {
+                    _mpvChallengeCycleCts = null;
+                }
+            }, token);
+        }
+
+        private void StartChallengeRefresh(ChallengeState state)
+        {
+             // Deprecated for MPV - handled by Cycle now. Keeping empty or for DMD if needed? 
+             // DMD has its own cycle. This method was likely MPV specific.
+             // Leaving empty to satisfy any lingering callers safely.
+        }
+
+        private void StopChallengeRefresh(int achievementId)
+        {
+             // Deprecated
+        }
+
+        /// <summary>
+        /// EN: Unified cleanup for all RetroAchievements overlays and background task cycles
+        /// FR: Nettoyage unifié pour tous les vidéos RA et cycles de tâches en arrière-plan
+        /// </summary>
+        private async Task CleanupAllOverlays()
+        {
+            _logger.LogInformation("[RA Workflow] Cleaning up all RA overlays and cycles...");
+            
+            try
+            {
+                // 1. Stop all background cycles/timers (Achievement cycles)
+                if (_badgeCycleCts != null)
+                {
+                    _badgeCycleCts.Cancel();
+                    _badgeCycleCts = null;
+                }
+
+                if (_dmdChallengeCycleCts != null)
+                {
+                    _dmdChallengeCycleCts.Cancel();
+                    _dmdChallengeCycleCts = null;
+                }
+
+                if (_mpvChallengeCycleCts != null)
+                {
+                    _mpvChallengeCycleCts.Cancel();
+                    _mpvChallengeCycleCts = null;
+                }
+
+                _activeChallenges.Clear();
+
+                // 2. Stop all Challenge refresh tasks (Deprecated but safe cleanup)
+                foreach (var kvp in _challengeRefreshCts.ToArray())
+                {
+                    if (_challengeRefreshCts.TryRemove(kvp.Key, out var cts))
+                    {
+                        cts.Cancel();
+                        cts.Dispose();
+                    }
+                }
+
+                // 3. Remove MPV Overlays (All slots used by RA/RP)
+                if (_config.IsMpvEnabled)
+                {
+                    StopMpvRpStatRotation(); // Stop MPV RP Rotation Loop
+                    
+                    // EN: Clear slots 1-12 to be exhaustive (includes RA notifications, scores, and preview slots)
+                    // FR: Nettoyer les slots 1-12 pour être exhaustif (inclus notifications RA, scores et slots preview)
+                    for (int i = 1; i <= 12; i++)
+                    {
+                        await _mpv.RemoveOverlay(i, cancelTimer: (i == 1 || i >= 10)); 
+                    }
+                    await _mpv.ClearRetroAchievementData(); // OSD Lua
+                }
+
+                // 4. Clear DMD
+                if (_config.DmdEnabled)
+                {
+                    StopDmdRpStatRotation(); // EN: Stop RP rotation first / FR: Arrêter la rotation RP d'abord
+                    _dmdService.ClearOverlay();
+                    await _dmdService.SetDmdPersistentScoreAsync(""); // EN: Clear persistent score / FR: Effacer le score permanent
+                    await _dmdService.SetDmdPersistentLayoutAsync(Array.Empty<byte>()); // EN: Explicitly clear persistent RP layout / FR: Effacer explicitement le layout RP persistant
+                }
+
+                // 5. Cleanup physical cache (Force full purge on game stop/start)
+                _imageService.CleanupCache(forceFull: true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"[RA Workflow] Error during unified cleanup: {ex.Message}");
+            }
+        }
+
+        private async Task RefreshChallengeMpvOverlay(ChallengeState state)
+        {
+            if (!_config.IsMpvEnabled || !_gameRunning) return;
+
+            bool isHc = _raService?.IsHardcoreMode ?? false;
+            var overlayPath = _imageService.GenerateChallengeOverlay(state, _config.MarqueeWidth, _config.MarqueeHeight, isHc);
+            if (!string.IsNullOrEmpty(overlayPath))
+            {
+                await _mpv.OverlayImage(overlayPath, 5);
+            }
+        }
+
+        private async void OnRichPresenceUpdated(object? sender, string rpText)
+        {
+            // EN: If an achievement is being processed, suppress RP updates to avoid visual conflict/race conditions
+            // FR: Si un succès est en cours de traitement, supprimer les MAJ RP pour éviter conflits visuels/race conditions
+            if (_isProcessingAchievement)
+            {
+                _logger.LogInformation($"[RA Workflow] RP Update SUPPRESSED due to active achievement processing: {rpText}");
+                return;
+            }
+
+            var mpvOverlays = _config.MpvRetroAchievementsOverlays;
+            var dmdOverlays = _config.DmdRetroAchievementsOverlays;
+
+            try
+            {
+                var isHc = _raService?.IsHardcoreMode ?? false;
+                var currentState = _imageService.ParseRichPresence(rpText);
+                var target = _config.MarqueeRetroAchievementsDisplayTarget; // dmd, mpv, both
+
+                // 1. MPV Update
+                if (target != "dmd" && mpvOverlays.Contains("items", StringComparison.OrdinalIgnoreCase))
+                {
+                    // EN: Calculate vertical offset for items
+                    int persistentOverlayHeight = Math.Max(10, _config.MarqueeHeight / 16); 
+                    int itemOffset = persistentOverlayHeight + 15; 
+
+                    if (currentState.Stats.Count > 0 && currentState.IsStatsChanged(_lastRpState))
+                    {
+                        lock(_currentMpvRpGenericStats) { _currentMpvRpGenericStats.Clear(); }
+                        
+                        foreach (var kvp in currentState.Stats)
+                        {
+                            var key = kvp.Key.ToLowerInvariant();
+                            string alignment = "top-left";
+                            int slot = 8;
+                            int nudge = itemOffset;
+                            bool isScoreItem = false;
+                            bool isGeneric = true;
+
+                            if (key.Contains("score") || key.Contains("💵")) { alignment = "top-right"; slot = 3; isScoreItem = true; isGeneric = false; }
+                            else if (key.Contains("lives") || key.Contains("❤️") || key.Contains("vies")) { alignment = "top-left"; slot = 6; isGeneric = false; }
+                            else if (key.Contains("weapon") || key.Contains("arme") || key.Contains("🔫")) { alignment = "bottom-right"; slot = 7; nudge = 0; isGeneric = false; }
+                            else if (key.Contains("lap") || key.Contains("tour")) { alignment = "top-left"; slot = 9; isGeneric = false; } 
+                            else if (key.Contains("rank") || key.Contains("pos")) { alignment = "top-right"; slot = 10; isGeneric = false; }
+
+                            if (isGeneric)
+                            {
+                                lock(_currentMpvRpGenericStats) { _currentMpvRpGenericStats[kvp.Key] = kvp.Value; }
+                            }
+                            else
+                            {
+                                var itemPath = _imageService.GenerateRichPresenceItemOverlay(kvp.Key, kvp.Value, isHc, _config.MarqueeWidth, _config.MarqueeHeight, isScore: isScoreItem, alignment: alignment, yOffset: nudge);
+                                if (File.Exists(itemPath)) await _mpv.OverlayImage(itemPath, slot);
+                            }
+                        }
+
+                        // Handle Generic Stats Rotation vs Static
+                        int genericCount;
+                        lock(_currentMpvRpGenericStats) { genericCount = _currentMpvRpGenericStats.Count; }
+
+                        if (genericCount > 1)
+                        {
+                            StartMpvRpStatRotation(persistentOverlayHeight);
+                        }
+                        else if (genericCount == 1)
+                        {
+                            StopMpvRpStatRotation();
+                            // Display the single generic item
+                            var first = _currentMpvRpGenericStats.First();
+                            var itemPath = _imageService.GenerateRichPresenceItemOverlay(first.Key, first.Value, isHc, _config.MarqueeWidth, _config.MarqueeHeight, isScore: false, alignment: "top-left", yOffset: itemOffset);
+                            if (File.Exists(itemPath)) await _mpv.OverlayImage(itemPath, 8);
+                        }
+                        else
+                        {
+                             StopMpvRpStatRotation();
+                             await _mpv.RemoveOverlay(8, false);
+                        }
+                    }
+                    else if (currentState.Stats.Count == 0 && (_lastRpState?.Stats.Count ?? 0) > 0)
+                    {
+                        await _mpv.RemoveOverlay(3, false);
+                        await _mpv.RemoveOverlay(6, false);
+                        await _mpv.RemoveOverlay(7, false);
+                        await _mpv.RemoveOverlay(8, false);
+                        await _mpv.RemoveOverlay(9, false);
+                        await _mpv.RemoveOverlay(10, false);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(currentState.Narrative) && currentState.IsNarrativeChanged(_lastRpState))
+                    {
+                        var mpvNarrativePath = await _imageService.GenerateRichPresenceOverlay(currentState.Narrative, isHc, _config.MarqueeWidth, _config.MarqueeHeight, position: "center");
+                        if (File.Exists(mpvNarrativePath))
+                        {
+                            await _mpv.OverlayImage(mpvNarrativePath, 4);
+                            // EN: Increased delay from 8s to 15s to ensure long scrolling GIFs finish
+                            // FR: Augmentation du délai de 8s à 15s pour garantir que les longs GIFs défilants se terminent
+                            _ = Task.Delay(15000).ContinueWith(_ => _mpv.RemoveOverlay(4, false));
+                        }
+                    }
+                }
+
+                // 2. DMD Update
+                if (target != "mpv" && dmdOverlays.Contains("items", StringComparison.OrdinalIgnoreCase))
+                {
+                    if ((DateTime.Now - _lastDmdRpUpdate).TotalSeconds >= 0.4)
+                    {
+                        _lastDmdRpUpdate = DateTime.Now;
+                        bool statsChanged = currentState.IsStatsChanged(_lastRpState);
+                        bool narrativeChanged = currentState.IsNarrativeChanged(_lastRpState);
+
+                        if (statsChanged || narrativeChanged)
+                        {
+                            // EN: Always update the stored stats snapshot for the rotation loop
+                            // FR: Toujours mettre à jour le snapshot des stats pour la boucle de rotation
+                            lock(_currentDmdRpStats)
+                            {
+                                _currentDmdRpStats.Clear();
+                                foreach(var kvp in currentState.Stats) _currentDmdRpStats[kvp.Key] = kvp.Value;
+                            }
+
+                            // 1. Handle Stats Rotation
+                            // FR: Gérer la rotation des statistiques
+                            var rpStats = currentState.Stats.Where(kvp => {
+                                string lk = kvp.Key.ToLowerInvariant();
+                                return !(lk.Contains("score") || lk.Contains("💵") || lk.Contains("live") || lk.Contains("♥") || lk.Contains("vies") || lk.Contains("weapon") || lk.Contains("arme") || lk.Contains("🔫"));
+                            }).ToList();
+
+                            if (rpStats.Count > 1)
+                            {
+                                StartDmdRpStatRotation(); // No need to pass stats anymore
+                            }
+                            else
+                            {
+                                StopDmdRpStatRotation();
+                                // Generate Static Composition
+                                bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                                var dmdComposition = _imageService.GenerateDmdRichPresenceComposition(currentState.Stats, _config.DmdWidth, _config.DmdHeight, useGrayscale);
+                                if (dmdComposition != null && dmdComposition.Length > 0)
+                                {
+                                    await _dmdService.SetDmdPersistentLayoutAsync(dmdComposition);
+                                }
+                            }
+
+                            _dmdRpDisplayExpiry = DateTime.Now.AddSeconds(10);
+                            
+                            // 2. Handle Narrative (Scrolling Text)
+                            // FR: Gérer la Narration (Texte défilant)
+                            if (narrativeChanged && !string.IsNullOrEmpty(currentState.Narrative))
+                            {
+                                string cleanNarrative = _imageService.CleanRichPresenceString(currentState.Narrative, stripEmojis: false);
+                                if (!string.IsNullOrEmpty(cleanNarrative))
+                                {
+                                     // Get layout definition for rp_narration
+                                     var narrationItem = _templateService.GetItem("dmd", "rp_narration");
+                                     int? yOverride = null;
+                                     int? hOverride = null;
+                                     string? colorOverride = null;
+                                     float? fontSizeOverride = null;
+                                     if (narrationItem != null && narrationItem.IsEnabled)
+                                     {
+                                         yOverride = narrationItem.Y;
+                                         hOverride = narrationItem.Height;
+                                         colorOverride = narrationItem.TextColor;
+                                         if (narrationItem.FontSize > 0) fontSizeOverride = narrationItem.FontSize;
+                                     }
+
+                                     await _dmdService.PlayRichPresenceNotificationAsync(cleanNarrative, 5000, yOverride, hOverride, colorOverride, fontSizeOverride);
+
+                                     // EN: Auto-clear DMD notification after duration (only clears notification layer, keeps stats)
+                                     // FR: Effacement auto de la notification DMD après la durée (efface seulement la couche notification)
+                                     _ = Task.Delay(5500).ContinueWith(_ => {
+                                         if (DateTime.Now >= _dmdRpDisplayExpiry)
+                                         {
+                                             _dmdService.ClearOverlay();
+                                         }
+                                     });
+                                }
+                            }
+                        }
+                    }
+                }
+                _lastRpState = currentState;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[RA Workflow] Failed to update Rich Presence overlay: {ex.Message}");
+            }
+        }
+
+        private CancellationTokenSource? _previewCts;
+        private Task? _bgPreviewTask;
+
+        private async Task HandlePreviewOverlay(string screenType)
+        {
+            _logger.LogInformation($"[Preview] Dispatching live preview request for: {screenType}");
+
+            // 1. Cancel previous preview task if any
+            if (_previewCts != null)
+            {
+                _previewCts.Cancel();
+                _previewCts.Dispose();
+            }
+            _previewCts = new CancellationTokenSource();
+            var token = _previewCts.Token;
+
+            // 2. Chain execution to ensure strict serialization (New task waits for Old to finish/cancel)
+            var previousTask = _bgPreviewTask;
+            _bgPreviewTask = Task.Run(async () =>
+            {
+                // Wait for previous to fully stop (it received Cancel signal above)
+                if (previousTask != null)
+                {
+                    try { await previousTask; } catch { }
+                }
+
+                if (token.IsCancellationRequested) return;
+
+                await HandlePreviewOverlayInternal(screenType, token);
+            }, token);
+
+            // 3. Return immediately to unblock the IPC Server!
+            await Task.CompletedTask;
+        }
+
+        private async Task HandlePreviewOverlayInternal(string screenType, CancellationToken token)
+        {
+            _logger.LogInformation($"[Preview] Starting background generation for: {screenType}");
+            
+            // EN: Force reload of overlay layout to pick up latest editor changes
+            // FR: Force le rechargement de la mise en page d'overlay pour récupérer les derniers changements de l'éditeur
+            try
+            {
+                _templateService.Reload();
+                _logger.LogInformation("[Preview] Layout configuration reloaded.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[Preview] Failed to reload layout: {ex.Message}");
+            }
+
+            // 0. Cleanup Cache before generation to avoid bloating with previous test files
+            // EN: Use false for forceFull to keep recent ones to avoid flicker risk, but clean old ones
+            _imageService.CleanupCache(forceFull: false);
+
+            // 1. Force reload of current background image to ensure MPV is active and unpaused
+            // EN: Simulate "System Selected" by reloading the current image
+            // FR: Simuler "System Selected" en rechargeant l'image actuelle
+            try
+            {
+                if (_config.IsMpvEnabled && !string.IsNullOrEmpty(_currentMarqueePath))
+                {
+                    _logger.LogInformation($"[Preview] Reloading current marquee to force refresh: {_currentMarqueePath}");
+                    await _mpv.DisplayImage(_currentMarqueePath, loop: true); // loop=true matches standard display
+                    await Task.Delay(200, token); // Wait for load
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[Preview] Failed to reload background image: {ex.Message}");
+            }
+
+            // 2. Clear existing overlays immediately (Explicit loop to ensure visual clear)
+            try 
+            {
+                if (_config.IsMpvEnabled)
+                {
+                    for (int i = 1; i <= 12; i++) await _mpv.RemoveOverlay(i);
+                }
+                
+                await Task.Delay(50, token);
+            }
+            catch { /* Ignore cleanup errors */ }
+
+            // Ensure CleanupAllOverlays is still called for internal state
+            await CleanupAllOverlays();
+
+            bool isDmd = screenType.Equals("dmd", StringComparison.OrdinalIgnoreCase);
+
+            try
+            {
+                if (isDmd)
+                {
+                    // Full Composite Preview for DMD
+                    await _dmdService.PlayFullPreviewAsync();
+                }
+                else
+                {
+                    // Full MPV Multi-Slot Preview
+                    var width = _config.MarqueeWidth;
+                    var height = _config.MarqueeHeight;
+
+                    if (token.IsCancellationRequested) return;
+
+                    // EN: Display Loading Indicator immediately
+                    // FR: Afficher l'indicateur de chargement immédiatement
+                    var loadingPath = _imageService.GeneratePreviewStatusOverlay("Wait preview load...", width, height);
+                    if (!string.IsNullOrEmpty(loadingPath) && File.Exists(loadingPath)) 
+                    {
+                        await _mpv.OverlayImage(loadingPath, 8);
+                    }
+
+                    // EN: Parallelize image generation
+                    // FR: Paralléliser la génération d'images
+                    var dummyAchievements = new Dictionary<string, Achievement>();
+                    if (_raService != null)
+                    {
+                        for (int i = 0; i < 10; i++)
+                            dummyAchievements.Add(i.ToString(), new Achievement { ID = 0, Title = "Test", Unlocked = (i % 2 == 0), DisplayOrder = i });
+                    }
+
+                    // Launch all generation tasks
+                    var t1 = Task.Run<string>(() => _imageService.GenerateMpvAchievementOverlay(string.Empty, "TEST SUCCESS", "Unlock Preview", 100, false, "overlays", true) ?? string.Empty, token);
+                    var t2 = Task.Run<string>(async () => (_raService != null) ? (await _imageService.GenerateBadgeRibbonOverlay(dummyAchievements, 0, _raService, false, false, true)) ?? string.Empty : string.Empty, token); // Force Regenerate
+                    var t3 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Score", "1,234,567", true, width, height, false, false, "top-right", 0, true, token), token);
+                    var t4 = _imageService.GenerateRichPresenceOverlay("This is a live preview showing how all elements fit together on your Marquee.", true, width, height, null, "center", true, token);
+                    var t5 = Task.Run<string>(() => _imageService.GenerateAchievementCountOverlay(15, 35, false, isHardcore: true, true) ?? string.Empty, token); // Force Regenerate
+                    var t6 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Lives", "3", true, width, height, false, false, "top-left", 50, true, token), token);
+                    var t7 = Task.Run<string>(() => _imageService.GenerateChallengeOverlay(new ChallengeState { IsActive = true, Title = "Badge Challenge", Description = "With Image", CurrentValue = 5, TargetValue = 10, BadgePath = "dummy.png" }, width, height, true) ?? string.Empty, token);
+                    var t8 = Task.Run<string>(() => _imageService.GeneratePreviewStatusOverlay("Preview Mode Active", width, height) ?? string.Empty, token);
+                    var t9 = Task.Run<string>(() => _imageService.GenerateScoreOverlay(1234, 5000, isDmd: false, isHardcore: true, true) ?? string.Empty, token); // Force Regenerate
+                    var t10 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Stats", "x5 Multiplier", true, width, height, false, false, "top-left", 80, true, token), token);
+                    var t11 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Weapon", "Plasma Gun", true, width, height, false, false, "bottom-right", 0, true, token), token);
+                    var t12 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Lap", "Lap 2/3", true, width, height, false, false, "top-left", 120, true, token), token);
+                    var t13 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Rank", "Pos 1/12", true, width, height, false, false, "top-right", 120, true, token), token);
+
+                    // Wait for all
+                    // Wait for all
+                    try 
+                    {
+                        await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"[Preview] One or more generation tasks failed: {ex.Message}");
+                        // We continue to try showing whatever succeeded, or rethrow?
+                        // If we don't rethrow, code below executes. T.Result might throw.
+                        // Better to check task status before accessing Result below.
+                    }
+
+                    if (token.IsCancellationRequested) return;
+
+                    // Helper to safely overlay if file exists
+                    async Task SafeOverlay(string? path, int slot)
+                    {
+                        if (token.IsCancellationRequested) return;
+                        
+                        // EN: Explicitly remove before adding to force refresh in MPV
+                        // FR: Supprimer explicitement avant d'ajouter pour forcer le rafraîchissement dans MPV
+                        await _mpv.RemoveOverlay(slot);
+                        await Task.Delay(50, token); // Brief pause to prevent command flooding/race
+
+                        if (!string.IsNullOrEmpty(path) && File.Exists(path)) 
+                        {
+                            await _mpv.OverlayImage(path, slot);
+                        }
+                    }
+
+                    // Apply Overlays Sequentially
+                    // Apply Overlays Sequentially (Robustly)
+                    // Helper to get result safe
+                    string? GetResultOrNull(Task<string> t) => (t.Status == TaskStatus.RanToCompletion) ? t.Result : null;
+
+                    await SafeOverlay(GetResultOrNull(t1), 1);
+                    await SafeOverlay(GetResultOrNull(t2), 2);
+                    await SafeOverlay(GetResultOrNull(t3), 3);
+                    await SafeOverlay(GetResultOrNull(t4), 4);
+                    await SafeOverlay(GetResultOrNull(t5), 5);
+                    await SafeOverlay(GetResultOrNull(t6), 6);
+                    await SafeOverlay(GetResultOrNull(t7), 7);
+                    await SafeOverlay(GetResultOrNull(t8), 8);
+                    await SafeOverlay(GetResultOrNull(t9), 12); // Persistent Score (Moved to 12)
+                    await SafeOverlay(GetResultOrNull(t10), 8); // Stats (Slot 8)
+                    await SafeOverlay(GetResultOrNull(t11), 7); // Weapon (Slot 7)
+                    await SafeOverlay(GetResultOrNull(t12), 9); // Lap (Slot 9)
+                    await SafeOverlay(GetResultOrNull(t13), 10); // Rank (Slot 10)
+
+                    // EN: RefreshPlayer removed in favor of Image Reload strategy
+                    // FR: RefreshPlayer supprimé au profit de la stratégie Image Reload
+                    // await _mpv.RefreshPlayer();
+
+                    // Auto-cleanup preview after 30s (cancelled if new preview starts)
+                    _ = Task.Run(async () => 
+                    {
+                        try 
+                        {
+                            await Task.Delay(30000, token);
+                            if (!token.IsCancellationRequested) await CleanupAllOverlays();
+                        }
+                        catch (OperationCanceledException) { }
+                    }, token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("[Preview] Operation cancelled during internal generation.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[Preview] Failed to generate exhaustive preview: {ex.Message}");
+            }
+        }
         public void Dispose()
         {
             if (_inputService != null)
             {
                 _inputService.OnMoveCommand -= HandleMoveCommand;
             }
+            StopDmdRpStatRotation();
+            StopMpvRpStatRotation();
             _badgeCycleCts?.Cancel();
             _badgeCycleCts?.Dispose();
             _mpvBadgeCycleCts?.Cancel();
             _mpvBadgeCycleCts?.Dispose();
             _watcher?.Dispose();
             _dmdService.Stop();
+        }
+
+        /// <summary>
+        /// EN: Start rotation for multiple RP statistics on DMD (2s interval)
+        /// FR: Démarrer la rotation des statistiques RP sur DMD (intervalle de 2s)
+        /// </summary>
+        private void StartDmdRpStatRotation()
+        {
+            if (_dmdRpStatRotationCts != null) return; // Already running
+
+            _dmdRpStatRotationCts = new CancellationTokenSource();
+            var token = _dmdRpStatRotationCts.Token;
+
+            _ = Task.Run(async () =>
+            {
+                _logger.LogInformation("[DMD RP] Starting Stat Rotation loop.");
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        Dictionary<string, string> statsClone;
+                        lock(_currentDmdRpStats)
+                        {
+                            statsClone = new Dictionary<string, string>(_currentDmdRpStats);
+                        }
+
+                        // Identify rp_stat items to count them for rotation
+                        var rpStatsCount = statsClone.Count(kvp => {
+                            string lk = kvp.Key.ToLowerInvariant();
+                            return !(lk.Contains("score") || lk.Contains("💵") || lk.Contains("live") || lk.Contains("♥") || lk.Contains("vies") || lk.Contains("weapon") || lk.Contains("arme") || lk.Contains("🔫"));
+                        });
+
+                        if (rpStatsCount <= 1) break; 
+
+                        bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                        var dmdComposition = _imageService.GenerateDmdRichPresenceComposition(statsClone, _config.DmdWidth, _config.DmdHeight, useGrayscale, _dmdRpStatIndex);
+                        
+                        if (dmdComposition != null && dmdComposition.Length > 0)
+                        {
+                            await _dmdService.SetDmdPersistentLayoutAsync(dmdComposition);
+                        }
+
+                        await Task.Delay(2000, token);
+                        _dmdRpStatIndex = (_dmdRpStatIndex + 1) % rpStatsCount;
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[DMD RP] Rotation Error: {ex.Message}");
+                }
+                finally
+                {
+                    _dmdRpStatRotationCts = null;
+                }
+            }, token);
+        }
+
+        private void StopDmdRpStatRotation()
+        {
+            if (_dmdRpStatRotationCts != null)
+            {
+                _dmdRpStatRotationCts.Cancel();
+                _dmdRpStatRotationCts.Dispose();
+                _dmdRpStatRotationCts = null;
+                _dmdRpStatIndex = 0;
+            }
+        }
+
+        // EN: MPV Rotation Fields
+        // FR: Champs pour la rotation MPV
+        private CancellationTokenSource? _mpvRpStatRotationCts;
+        private int _mpvRpStatIndex = 0;
+        private Dictionary<string, string> _currentMpvRpGenericStats = new();
+
+        private void StartMpvRpStatRotation(int persistentOverlayHeight)
+        {
+            if (_mpvRpStatRotationCts != null) return;
+
+            _mpvRpStatRotationCts = new CancellationTokenSource();
+            var token = _mpvRpStatRotationCts.Token;
+
+            _ = Task.Run(async () =>
+            {
+                _logger.LogInformation("[MPV RP] Starting Stat Rotation loop.");
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        List<KeyValuePair<string, string>> statsList;
+                        lock(_currentMpvRpGenericStats)
+                        {
+                            statsList = _currentMpvRpGenericStats.ToList();
+                        }
+
+                        if (statsList.Count <= 1) break;
+
+                        if (_mpvRpStatIndex >= statsList.Count) _mpvRpStatIndex = 0;
+                        var kvp = statsList[_mpvRpStatIndex];
+
+                        // Generate Overlay for Slot 8
+                        var isHc = _raService?.IsHardcoreMode ?? false;
+                        int itemOffset = persistentOverlayHeight + 15;
+                        var itemPath = _imageService.GenerateRichPresenceItemOverlay(kvp.Key, kvp.Value, isHc, _config.MarqueeWidth, _config.MarqueeHeight, isScore: false, alignment: "top-left", yOffset: itemOffset);
+                        
+                        if (File.Exists(itemPath))
+                        {
+                             await _mpv.OverlayImage(itemPath, 8);
+                        }
+
+                        await Task.Delay(2000, token);
+                        _mpvRpStatIndex = (_mpvRpStatIndex + 1) % statsList.Count;
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[MPV RP] Rotation Error: {ex.Message}");
+                }
+                finally
+                {
+                    _mpvRpStatRotationCts = null;
+                }
+            }, token);
+        }
+
+        private void StopMpvRpStatRotation()
+        {
+            if (_mpvRpStatRotationCts != null)
+            {
+                _mpvRpStatRotationCts.Cancel();
+                _mpvRpStatRotationCts.Dispose();
+                _mpvRpStatRotationCts = null;
+                _mpvRpStatIndex = 0;
+            }
         }
     }
 }

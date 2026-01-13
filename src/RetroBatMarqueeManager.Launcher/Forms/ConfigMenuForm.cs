@@ -417,10 +417,11 @@ namespace RetroBatMarqueeManager.Launcher.Forms
 
         private void menu_help_about_Click(object sender, EventArgs e)
         {
+            var version = System.Diagnostics.FileVersionInfo.GetVersionInfo(System.Reflection.Assembly.GetExecutingAssembly().Location).ProductVersion;
             MessageBox.Show(
-                "RetroBat Marquee Manager - Configuration\r\n" +
-                "Version 1.0.0.0\r\n\r\n" +
-                "© 2025 RetroBat Team",
+                $"RetroBat Marquee Manager - Configuration\r\n" +
+                $"Version {version}\r\n\r\n" +
+                "© 2026 RetroBat Team",
                 "About",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
@@ -439,6 +440,49 @@ namespace RetroBatMarqueeManager.Launcher.Forms
         private void btn_cancel_Click(object sender, EventArgs e)
         {
             Close();
+        }
+
+        private void btnEditDmdLayout_Click(object sender, EventArgs e)
+        {
+            OpenOverlayDesigner("dmd");
+        }
+
+        private void btnEditMpvLayout_Click(object sender, EventArgs e)
+        {
+            OpenOverlayDesigner("mpv");
+        }
+
+        private void OpenOverlayDesigner(string screenType)
+        {
+            var config = _configManager.LoadConfig();
+            var templatePath = _configManager.GetValue(config, "Settings", "OverlayTemplatePath", @"overlays.json");
+            
+            // EN: Force root path if still pointing to config folder / FR: Forcer la racine si pointe encore vers config
+            if (templatePath.StartsWith("config\\", StringComparison.OrdinalIgnoreCase))
+                templatePath = templatePath.Substring(7);
+
+            // Convert to absolute if relative
+            if (!System.IO.Path.IsPathRooted(templatePath))
+            {
+                templatePath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, templatePath);
+            }
+
+            int w = 128, h = 32;
+            if (screenType == "mpv")
+            {
+                if (!int.TryParse(txtMarqueeWidth.Text, out w)) w = 1920;
+                if (!int.TryParse(txtMarqueeHeight.Text, out h)) h = 360;
+            }
+            else
+            {
+                if (!int.TryParse(txtDMDWidth.Text, out w)) w = 128;
+                if (!int.TryParse(txtDMDHeight.Text, out h)) h = 32;
+            }
+
+            using (var designer = new OverlayDesignerForm(templatePath, screenType, w, h))
+            {
+                designer.ShowDialog(this);
+            }
         }
 
         private void btnBrowseDMDExe_Click(object sender, EventArgs e)
@@ -563,12 +607,20 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             
             cboVideoGeneration.SelectedItem = _configManager.GetValue(_config, "Settings", "MarqueeVideoGeneration", "false");
             txtVideoFolder.Text = _configManager.GetValue(_config, "Settings", "GenerateMarqueeVideoFolder", "generated_videos");
+            cboFfmpegHwEncoding.SelectedItem = _configManager.GetValue(_config, "Settings", "FfmpegHwEncoding", "");
+            
+            // Tooltips for new hardware acceleration options
+            toolTipHint.SetToolTip(cboFfmpegHwEncoding, _translationManager.Translate("tip_ffmpeg_hw_encoding"));
             
             // GENERAL TAB - RetroAchievements
             chkRAEnable.Checked = _configManager.GetValue(_config, "Settings", "MarqueeRetroAchievements", "false") == "true";
             txtRAApiKey.Text = _configManager.GetValue(_config, "Settings", "RetroAchievementsWebApiKey", "");
             cboRADisplayTarget.SelectedItem = _configManager.GetValue(_config, "Settings", "MarqueeRetroAchievementsDisplayTarget", "both");
-            txtRAOverlays.Text = _configManager.GetValue(_config, "Settings", "MarqueeRetroAchievementsOverlays", "");
+            txtRAOverlays.Text = _configManager.GetValue(_config, "Settings", "MarqueeRetroAchievementsOverlays", "score,badges,count,items,challenge");
+            txtMpvRAOverlays.Text = _configManager.GetValue(_config, "Settings", "MpvRetroAchievementsOverlays", "");
+            txtDmdRAOverlays.Text = _configManager.GetValue(_config, "Settings", "DmdRetroAchievementsOverlays", "");
+            chk_ra_mpv_notifs.Checked = _configManager.GetValue(_config, "Settings", "MpvRetroAchievementsNotifications", "true") == "true";
+            chk_ra_dmd_notifs.Checked = _configManager.GetValue(_config, "Settings", "DmdRetroAchievementsNotifications", "true") == "true";
             
             // GENERAL TAB - User Interface
             chkMinimizeToTray.Checked = _configManager.GetValue(_config, "Settings", "MinimizeToTray", "true") == "true";
@@ -623,6 +675,8 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             txtSystemCustomMarqueePath.Text = _configManager.GetValue(_config, "ScreenMPV", "SystemCustomMarqueePath", "medias\\customs\\systems");
             txtGameCustomMarqueePath.Text = _configManager.GetValue(_config, "ScreenMPV", "GameCustomMarqueePath", "medias\\customs\\games");
             txtGameStartMediaPath.Text = _configManager.GetValue(_config, "ScreenMPV", "GameStartMediaPath", "medias\\customs\\games-start");
+            cboHwDecoding.SelectedItem = _configManager.GetValue(_config, "ScreenMPV", "HwDecoding", "no");
+            toolTipHint.SetToolTip(cboHwDecoding, _translationManager.Translate("tip_hw_decoding"));
             
             // ADVANCED TAB
             txtCollectionCorrelation.Text = _configManager.GetValue(_config, "Settings", "CollectionCorrelation", "");
@@ -650,12 +704,17 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             
             _configManager.SetValue(_config, "Settings", "MarqueeVideoGeneration", cboVideoGeneration.SelectedItem?.ToString() ?? "false");
             _configManager.SetValue(_config, "Settings", "GenerateMarqueeVideoFolder", txtVideoFolder.Text);
+            _configManager.SetValue(_config, "Settings", "FfmpegHwEncoding", cboFfmpegHwEncoding.SelectedItem?.ToString() ?? "");
             
             // GENERAL TAB - RetroAchievements
             _configManager.SetValue(_config, "Settings", "MarqueeRetroAchievements", chkRAEnable.Checked.ToString().ToLower());
             _configManager.SetValue(_config, "Settings", "RetroAchievementsWebApiKey", txtRAApiKey.Text);
             _configManager.SetValue(_config, "Settings", "MarqueeRetroAchievementsDisplayTarget", cboRADisplayTarget.SelectedItem?.ToString() ?? "both");
             _configManager.SetValue(_config, "Settings", "MarqueeRetroAchievementsOverlays", txtRAOverlays.Text);
+            _configManager.SetValue(_config, "Settings", "MpvRetroAchievementsOverlays", txtMpvRAOverlays.Text);
+            _configManager.SetValue(_config, "Settings", "DmdRetroAchievementsOverlays", txtDmdRAOverlays.Text);
+            _configManager.SetValue(_config, "Settings", "MpvRetroAchievementsNotifications", chk_ra_mpv_notifs.Checked.ToString().ToLower());
+            _configManager.SetValue(_config, "Settings", "DmdRetroAchievementsNotifications", chk_ra_dmd_notifs.Checked.ToString().ToLower());
             
             // GENERAL TAB - User Interface
             _configManager.SetValue(_config, "Settings", "MinimizeToTray", chkMinimizeToTray.Checked.ToString().ToLower());
@@ -709,6 +768,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             _configManager.SetValue(_config, "ScreenMPV", "SystemCustomMarqueePath", txtSystemCustomMarqueePath.Text);
             _configManager.SetValue(_config, "ScreenMPV", "GameCustomMarqueePath", txtGameCustomMarqueePath.Text);
             _configManager.SetValue(_config, "ScreenMPV", "GameStartMediaPath", txtGameStartMediaPath.Text);
+            _configManager.SetValue(_config, "ScreenMPV", "HwDecoding", cboHwDecoding.SelectedItem?.ToString() ?? "no");
             
             // ADVANCED TAB
             _configManager.SetValue(_config, "Settings", "CollectionCorrelation", txtCollectionCorrelation.Text);

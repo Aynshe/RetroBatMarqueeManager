@@ -1,3 +1,6 @@
+using System.Threading.Tasks;
+using RetroBatMarqueeManager.Core.Models.RetroAchievements;
+
 namespace RetroBatMarqueeManager.Core.Interfaces
 {
     public interface IConfigService
@@ -18,6 +21,9 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         string DefaultFanartPath { get; }
         string Pcsx2LogPath { get; }
         string Pcsx2BadgeCachePath { get; }
+
+        string DuckStationLogPath { get; }
+        string DuckStationSettingsPath { get; }
         
         // Templates configurables (EN/FR: Configurable templates)
         string MarqueeFilePath { get; } // Template: {system_name}\{game_name}
@@ -84,10 +90,15 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         string MarqueeLayout { get; } // "standard", "gradient-left", "gradient-right"
         
         // RetroAchievements Settings
+        bool MpvRetroAchievementsNotifications { get; }
+        bool DmdRetroAchievementsNotifications { get; }
         string? RetroAchievementsWebApiKey { get; }
         string MarqueeRetroAchievementsOverlays { get; }
+        string MpvRetroAchievementsOverlays { get; }
+        string DmdRetroAchievementsOverlays { get; }
         string MarqueeRetroAchievementsDisplayTarget { get; } // EN: Target for RA display (dmd, mpv, both)
         string RAFontFamily { get; }
+        string OverlayTemplatePath { get; }
         
         // DMD Settings
         bool DmdEnabled { get; }
@@ -156,11 +167,26 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         Task InitializeAsync();
         Task PlayAsync(string mediaPath, string? system = null, string? gameName = null);
         Task SetOverlayAsync(string imagePath, int durationMs = 5000);
-        Task PlayAchievementSequenceAsync(string cupPath, string badgePath, string text, int totalDurationMs = 10000);
+        Task PlayAchievementSequenceAsync(string cupPath, string achOverlayPath, int totalDurationMs = 10000);
+        Task PlayRichPresenceNotificationAsync(string text, int durationMs = 5000, int? yOverride = null, int? heightOverride = null, string? textColor = null, float? fontSize = null); // EN: Play RP notification (scrolling) / FR: Jouer notification RP (défilement)
+        Task PlayDmdStaticNotificationAsync(string text, int durationMs = 3000); // EN: Play static RP notification / FR: Jouer notification RP statique
+        Task SetDmdPersistentScoreAsync(string scoreText); // EN: Set a persistent score overlay / FR: Définir un score permanent
+        Task SetDmdPersistentLayoutAsync(byte[] layoutBytes); // EN: Set a persistent full layout overlay / FR: Définir un overlay complet permanent
+        Task PlayChallengeNotificationAsync(ChallengeState state, bool isHardcore = false, string? ribbonPath = null); // EN: Play Challenge Overlay / FR: Jouer Overlay Défi
+        Task PlayFullPreviewAsync(); // EN: Play a full preview of all templates / FR: Jouer une prévisualisation complète de tous les templates
         Task<(bool handled, bool suspendMPV)> CheckAndRunPinballAsync(string system, string gameName);
         void ClearOverlay(); // EN: Clear active overlay / FR: Effacer overlay actif
         void Stop();
         string PrepareConfig(); // Generates DmdDevice.ini if needed
         Task WaitForExternalReleaseAsync(int timeoutMs = 2000); // Wait for external control to finish
+    }
+
+    public interface IOverlayTemplateService
+    {
+        OverlayLayout GetLayout();
+        OverlayLayout GetDefaultLayout();
+        void Reload();
+        void SaveLayout(OverlayLayout layout);
+        OverlayItem? GetItem(string screenType, string overlayType); // screenType: "dmd" or "mpv"
     }
 }

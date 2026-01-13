@@ -821,47 +821,42 @@ namespace RetroBatMarqueeManager.Application.Services
             var systemCandidates = new List<string> { system };
             if (_config.SystemAliases.TryGetValue(system, out var alias)) systemCandidates.Add(alias);
 
+            // Generate candidates list: RomName, SafeRomName, GameName, SafeGameName
+            var nameCandidates = new List<string>();
+            if (!string.IsNullOrEmpty(romFileName)) 
+            {
+                nameCandidates.Add(romFileName);
+                nameCandidates.Add(Path.GetFileNameWithoutExtension(romFileName));
+                nameCandidates.Add(Sanitize(romFileName));
+            }
+            if (!string.IsNullOrEmpty(gameName))
+            {
+                nameCandidates.Add(gameName);
+                nameCandidates.Add(Sanitize(gameName));
+            }
+
             foreach (var sysCand in systemCandidates)
             {
-                 // 1. Configured Path
-                 // Try romFileName
-                 if (!string.IsNullOrEmpty(romFileName))
+                 foreach (var cand in nameCandidates.Distinct())
                  {
-                     var rawPattern = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", Path.GetFileNameWithoutExtension(romFileName));
+                     if (string.IsNullOrEmpty(cand)) continue;
+
+                     // 1. Configured Path
+                     var rawPattern = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", cand);
                      if (rawPattern.Contains("-marquee")) rawPattern = rawPattern.Replace("-marquee", "-fanart");
                      else rawPattern += "-fanart";
                      
                      var f1 = FindSourceFile(Path.Combine(_config.MarqueeImagePath, rawPattern));
-                     // _logger.LogInformation($"[FindFanart] Testing ROM path: {rawPattern} -> Found: {f1 != null}");
                      if (f1 != null) return f1;
+                     
+                     // 2. Default Path
+                     var defPattern = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", cand);
+                     if (defPattern.Contains("-marquee")) defPattern = defPattern.Replace("-marquee", "-fanart");
+                     else defPattern += "-fanart";
+                     
+                     var f2 = FindSourceFile(Path.Combine(_config.MarqueeImagePathDefault, defPattern));
+                     if (f2 != null) return f2;
                  }
-                 
-                 // Try gameName
-                 var rawPatternGame = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", gameName);
-                 if (rawPatternGame.Contains("-marquee")) rawPatternGame = rawPatternGame.Replace("-marquee", "-fanart");
-                 else rawPatternGame += "-fanart";
-
-                 var f2 = FindSourceFile(Path.Combine(_config.MarqueeImagePath, rawPatternGame));
-                 // _logger.LogInformation($"[FindFanart] Testing GameName path: {rawPatternGame} -> Found: {f2 != null}");
-                 if (f2 != null) return f2;
-
-                 // 2. Default Path
-                 // Try romFileName
-                 if (!string.IsNullOrEmpty(romFileName))
-                 {
-                     var defPatternRom = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", Path.GetFileNameWithoutExtension(romFileName));
-                     if (defPatternRom.Contains("-marquee")) defPatternRom = defPatternRom.Replace("-marquee", "-fanart");
-                     else defPatternRom += "-fanart";
-                     var f3 = FindSourceFile(Path.Combine(_config.MarqueeImagePathDefault, defPatternRom));
-                     if (f3 != null) return f3;
-                 }
-
-                 // Try gameName
-                 var defPatternGame = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", gameName);
-                 if (defPatternGame.Contains("-marquee")) defPatternGame = defPatternGame.Replace("-marquee", "-fanart");
-                 else defPatternGame += "-fanart";
-                 var f4 = FindSourceFile(Path.Combine(_config.MarqueeImagePathDefault, defPatternGame));
-                 if (f4 != null) return f4;
             }
 
             return null;
@@ -883,6 +878,20 @@ namespace RetroBatMarqueeManager.Application.Services
             var systemCandidates = new List<string> { system };
             if (_config.SystemAliases.TryGetValue(system, out var alias)) systemCandidates.Add(alias);
             
+            // Generate candidates list: RomName, SafeRomName, GameName, SafeGameName
+            var nameCandidates = new List<string>();
+            if (!string.IsNullOrEmpty(romFileName)) 
+            {
+                nameCandidates.Add(romFileName);
+                nameCandidates.Add(Path.GetFileNameWithoutExtension(romFileName));
+                nameCandidates.Add(Sanitize(romFileName));
+            }
+            if (!string.IsNullOrEmpty(gameName))
+            {
+                nameCandidates.Add(gameName);
+                nameCandidates.Add(Sanitize(gameName));
+            }
+            
             // Suffixes in priority order (Screenshot, Thumb, Mix, Raw)
             var suffixes = new[] { "-image", "-thumb", "-mix", "" };
 
@@ -890,43 +899,26 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 foreach (var suffix in suffixes)
                 {
-                     // 1. Configured Path
-                     // Try romFileName
-                     if (!string.IsNullOrEmpty(romFileName))
+                     foreach (var cand in nameCandidates.Distinct()) // Distinct to avoid duplicates
                      {
-                         var rawPattern = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", Path.GetFileNameWithoutExtension(romFileName));
+                         if (string.IsNullOrEmpty(cand)) continue;
+
+                         // 1. Configured Path
+                         var rawPattern = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", cand);
                          if (rawPattern.Contains("-marquee")) rawPattern = rawPattern.Replace("-marquee", suffix);
                          else rawPattern += suffix;
                          
                          var f1 = FindSourceFile(Path.Combine(_config.MarqueeImagePath, rawPattern));
                          if (f1 != null) return f1;
+
+                         // 2. Default Path
+                         var defPattern = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", cand);
+                         if (defPattern.Contains("-marquee")) defPattern = defPattern.Replace("-marquee", suffix);
+                         else defPattern += suffix;
+                         
+                         var f2 = FindSourceFile(Path.Combine(_config.MarqueeImagePathDefault, defPattern));
+                         if (f2 != null) return f2;
                      }
-                     
-                     // Try gameName
-                     var rawPatternGame = _config.MarqueeFilePath.Replace("{system_name}", sysCand).Replace("{game_name}", gameName);
-                     if (rawPatternGame.Contains("-marquee")) rawPatternGame = rawPatternGame.Replace("-marquee", suffix);
-                     else rawPatternGame += suffix;
-
-                     var f2 = FindSourceFile(Path.Combine(_config.MarqueeImagePath, rawPatternGame));
-                     if (f2 != null) return f2;
-
-                     // 2. Default Path
-                     // Try romFileName
-                     if (!string.IsNullOrEmpty(romFileName))
-                     {
-                         var defPatternRom = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", Path.GetFileNameWithoutExtension(romFileName));
-                         if (defPatternRom.Contains("-marquee")) defPatternRom = defPatternRom.Replace("-marquee", suffix);
-                         else defPatternRom += suffix;
-                         var f3 = FindSourceFile(Path.Combine(_config.MarqueeImagePathDefault, defPatternRom));
-                         if (f3 != null) return f3;
-                     }
-
-                     // Try gameName
-                     var defPatternGame = _config.MarqueeFilePathDefault.Replace("{system_name}", sysCand).Replace("{game_name}", gameName);
-                     if (defPatternGame.Contains("-marquee")) defPatternGame = defPatternGame.Replace("-marquee", suffix);
-                     else defPatternGame += suffix;
-                     var f4 = FindSourceFile(Path.Combine(_config.MarqueeImagePathDefault, defPatternGame));
-                     if (f4 != null) return f4;
                 }
             }
 
@@ -1331,6 +1323,41 @@ namespace RetroBatMarqueeManager.Application.Services
             
             foreach (var cand in cacheCandidates.Distinct())
             {
+                // EN: If Composition is enabled, we prioritize finding a pre-composed image.
+                // FR: Si la composition est activée, on priorise la recherche d'une image pré-composée.
+                if (_config.DmdCompose)
+                {
+                     // Check for variants of composed filenames
+                     // Matches ImageConversionService: {logoName}_composed.png
+                     var possibleComposed = new[] 
+                     { 
+                         $"{cand}_composed.png", 
+                         $"{cand}-marquee_composed.png",
+                         $"{cand}-topper_composed.png"
+                     };
+                     
+                     _logger.LogInformation($"[DMD Cache Debug] Checking composed candidates for '{cand}' (DmdCompose=True)...");
+
+                     foreach(var composedName in possibleComposed)
+                     {
+                         string composedPath = Path.Combine(dmdCacheSystem, composedName);
+                         if (File.Exists(composedPath))
+                         {
+                             _logger.LogInformation($"[DMD] Found cached media (Composed): {composedPath}");
+                             return composedPath;
+                         }
+                     }
+                     
+                     // EN: If DmdCompose is TRUE, but we didn't find a composed image, 
+                     // we should SKIP returning the simple "{cand}.png" if it exists.
+                     // This forces the code to fall through to the Scan/Fallback logic (lines below),
+                     // which will attempt to FIND fanart and GENERATE a composition.
+                     // If that fails, it will just regenerate/return the simple image anyway.
+                     // This fixes the issue where a "Logo Only" cache blocks new Composition generation.
+                     continue; 
+                }
+
+                // Standard Behavior (No Composition or Not Enabled)
                 string cachedPath = Path.Combine(dmdCacheSystem, $"{cand}.png");
                 if (File.Exists(cachedPath))
                 {

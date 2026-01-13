@@ -151,6 +151,7 @@ public class Program
                     services.AddSingleton<MarqueeWorkflow>();
                     services.AddSingleton<OffsetStorageService>(); // Persistence (Images composées / Composed Images)
                     services.AddSingleton<VideoOffsetStorageService>(); // Persistence (Vidéos / Videos)
+                    services.AddSingleton<IOverlayTemplateService, OverlayTemplateService>();
                     services.AddSingleton<VideoMarqueeService>(); // Video Generation Service
                     services.AddSingleton<IInputService, RetroBatMarqueeManager.Infrastructure.Input.KeyboardInputService>(); // Input
                     services.AddSingleton<RetroBatMarqueeManager.Infrastructure.Installation.ScriptInstallerService>(); // Auto-Install Scripts

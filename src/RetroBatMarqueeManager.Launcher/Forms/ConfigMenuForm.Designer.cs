@@ -41,6 +41,8 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.txtRetroBatPath = new System.Windows.Forms.TextBox();
             this.txtVideoFolder = new System.Windows.Forms.TextBox();
             this.cboVideoGeneration = new System.Windows.Forms.ComboBox();
+            this.lbl_ffmpeg_hw_encoding = new System.Windows.Forms.Label();
+            this.cboFfmpegHwEncoding = new System.Windows.Forms.ComboBox();
             this.chkAutoConvert = new System.Windows.Forms.CheckBox();
             this.cboLayout = new System.Windows.Forms.ComboBox();
             this.cboComposeMedia = new System.Windows.Forms.ComboBox();
@@ -50,6 +52,14 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.cboRADisplayTarget = new System.Windows.Forms.ComboBox();
             this.txtRAApiKey = new System.Windows.Forms.TextBox();
             this.chkRAEnable = new System.Windows.Forms.CheckBox();
+            this.txtMpvRAOverlays = new System.Windows.Forms.TextBox();
+            this.lblMpvRAOverlays = new System.Windows.Forms.Label();
+            this.txtDmdRAOverlays = new System.Windows.Forms.TextBox();
+            this.lblDmdRAOverlays = new System.Windows.Forms.Label();
+            this.chk_ra_mpv_notifs = new System.Windows.Forms.CheckBox();
+            this.chk_ra_dmd_notifs = new System.Windows.Forms.CheckBox();
+            this.btnEditDmdLayout = new System.Windows.Forms.Button();
+            this.btnEditMpvLayout = new System.Windows.Forms.Button();
             this.txtAcceptedFormats = new System.Windows.Forms.TextBox();
             this.cboAutoStart = new System.Windows.Forms.ComboBox();
             this.txtPrioritySource = new System.Windows.Forms.TextBox();
@@ -62,6 +72,8 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.chkDMDEnabled = new System.Windows.Forms.CheckBox();
             this.txtDMDWidth = new System.Windows.Forms.TextBox();
             this.txtScreenNumber = new System.Windows.Forms.TextBox();
+            this.lbl_hw_decoding = new System.Windows.Forms.Label();
+            this.cboHwDecoding = new System.Windows.Forms.ComboBox();
             this.txtSSQueueLimit = new System.Windows.Forms.TextBox();
             this.txtSSQueueKeep = new System.Windows.Forms.TextBox();
             this.menuStrip = new System.Windows.Forms.MenuStrip();
@@ -295,6 +307,32 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.toolTipHint.SetToolTip(this.cboVideoGeneration, "Enable generation of marquee videos from game previews. (EN)\nActive la génération" +
         " de vidéos marquee à partir des aperçus de jeu. (FR)");
             // 
+            // lbl_ffmpeg_hw_encoding
+            // 
+            this.lbl_ffmpeg_hw_encoding.AutoSize = true;
+            this.lbl_ffmpeg_hw_encoding.Location = new System.Drawing.Point(15, 211);
+            this.lbl_ffmpeg_hw_encoding.Name = "lbl_ffmpeg_hw_encoding";
+            this.lbl_ffmpeg_hw_encoding.Size = new System.Drawing.Size(121, 15);
+            this.lbl_ffmpeg_hw_encoding.TabIndex = 12;
+            this.lbl_ffmpeg_hw_encoding.Text = "FFmpeg HW Encoding:";
+            // 
+            // cboFfmpegHwEncoding
+            // 
+            this.cboFfmpegHwEncoding.BackColor = System.Drawing.Color.White;
+            this.cboFfmpegHwEncoding.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.cboFfmpegHwEncoding.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.cboFfmpegHwEncoding.ForeColor = System.Drawing.Color.Black;
+            this.cboFfmpegHwEncoding.FormattingEnabled = true;
+            this.cboFfmpegHwEncoding.Items.AddRange(new object[] {
+            "",
+            "h264_nvenc",
+            "h264_amf",
+            "h264_qsv"});
+            this.cboFfmpegHwEncoding.Location = new System.Drawing.Point(180, 208);
+            this.cboFfmpegHwEncoding.Name = "cboFfmpegHwEncoding";
+            this.cboFfmpegHwEncoding.Size = new System.Drawing.Size(200, 23);
+            this.cboFfmpegHwEncoding.TabIndex = 13;
+            // 
             // chkAutoConvert
             // 
             this.chkAutoConvert.AutoSize = true;
@@ -397,6 +435,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.txtRAApiKey.ForeColor = System.Drawing.Color.Black;
             this.txtRAApiKey.Location = new System.Drawing.Point(180, 55);
             this.txtRAApiKey.Name = "txtRAApiKey";
+            this.txtRAApiKey.PasswordChar = '*';
             this.txtRAApiKey.Size = new System.Drawing.Size(534, 23);
             this.txtRAApiKey.TabIndex = 2;
             this.toolTipHint.SetToolTip(this.txtRAApiKey, "Your RetroAchievements Web API Key (required). (EN)\nVotre clé API Web RetroAchiev" +
@@ -572,6 +611,32 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.toolTipHint.SetToolTip(this.txtScreenNumber, "Index of secondary monitor (0, 1, 2...).\nSet to \'false\' to disable MPV screen. (E" +
         "N)\nIndex du moniteur secondaire (0, 1, 2...).\nMettre sur \'false\' pour désactiver" +
         " l\'écran MPV. (FR)");
+            // 
+            // lbl_hw_decoding
+            // 
+            this.lbl_hw_decoding.AutoSize = true;
+            this.lbl_hw_decoding.Location = new System.Drawing.Point(15, 124);
+            this.lbl_hw_decoding.Name = "lbl_hw_decoding";
+            this.lbl_hw_decoding.Size = new System.Drawing.Size(111, 15);
+            this.lbl_hw_decoding.TabIndex = 9;
+            this.lbl_hw_decoding.Text = "Hardware Decoding:";
+            // 
+            // cboHwDecoding
+            // 
+            this.cboHwDecoding.BackColor = System.Drawing.Color.White;
+            this.cboHwDecoding.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.cboHwDecoding.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.cboHwDecoding.ForeColor = System.Drawing.Color.Black;
+            this.cboHwDecoding.FormattingEnabled = true;
+            this.cboHwDecoding.Items.AddRange(new object[] {
+            "no",
+            "auto",
+            "d3d11va",
+            "dxva2"});
+            this.cboHwDecoding.Location = new System.Drawing.Point(180, 121);
+            this.cboHwDecoding.Name = "cboHwDecoding";
+            this.cboHwDecoding.Size = new System.Drawing.Size(200, 23);
+            this.cboHwDecoding.TabIndex = 10;
             // 
             // txtSSQueueLimit
             // 
@@ -973,6 +1038,8 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             // groupMarquee
             // 
+            this.groupMarquee.Controls.Add(this.cboFfmpegHwEncoding);
+            this.groupMarquee.Controls.Add(this.lbl_ffmpeg_hw_encoding);
             this.groupMarquee.Controls.Add(this.txtVideoFolder);
             this.groupMarquee.Controls.Add(this.lblVideoFolder);
             this.groupMarquee.Controls.Add(this.cboVideoGeneration);
@@ -988,7 +1055,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.groupMarquee.ForeColor = System.Drawing.Color.White;
             this.groupMarquee.Location = new System.Drawing.Point(13, 149);
             this.groupMarquee.Name = "groupMarquee";
-            this.groupMarquee.Size = new System.Drawing.Size(763, 220);
+            this.groupMarquee.Size = new System.Drawing.Size(763, 250);
             this.groupMarquee.TabIndex = 1;
             this.groupMarquee.TabStop = false;
             this.groupMarquee.Text = "Marquee Settings";
@@ -1040,6 +1107,12 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             // groupRA
             // 
+            this.groupRA.Controls.Add(this.chk_ra_dmd_notifs);
+            this.groupRA.Controls.Add(this.chk_ra_mpv_notifs);
+            this.groupRA.Controls.Add(this.txtDmdRAOverlays);
+            this.groupRA.Controls.Add(this.lblDmdRAOverlays);
+            this.groupRA.Controls.Add(this.txtMpvRAOverlays);
+            this.groupRA.Controls.Add(this.lblMpvRAOverlays);
             this.groupRA.Controls.Add(this.txtRAOverlays);
             this.groupRA.Controls.Add(this.lblRAOverlays);
             this.groupRA.Controls.Add(this.cboRADisplayTarget);
@@ -1050,7 +1123,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.groupRA.ForeColor = System.Drawing.Color.White;
             this.groupRA.Location = new System.Drawing.Point(13, 375);
             this.groupRA.Name = "groupRA";
-            this.groupRA.Size = new System.Drawing.Size(763, 150);
+            this.groupRA.Size = new System.Drawing.Size(763, 210);
             this.groupRA.TabIndex = 2;
             this.groupRA.TabStop = false;
             this.groupRA.Text = "RetroAchievements";
@@ -1081,6 +1154,62 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.lblRAApiKey.Size = new System.Drawing.Size(77, 15);
             this.lblRAApiKey.TabIndex = 1;
             this.lblRAApiKey.Text = "Web API Key:";
+            // 
+            // lblMpvRAOverlays
+            // 
+            this.lblMpvRAOverlays.AutoSize = true;
+            this.lblMpvRAOverlays.Location = new System.Drawing.Point(15, 154);
+            this.lblMpvRAOverlays.Name = "lblMpvRAOverlays";
+            this.lblMpvRAOverlays.Size = new System.Drawing.Size(83, 15);
+            this.lblMpvRAOverlays.TabIndex = 7;
+            this.lblMpvRAOverlays.Text = "MPV Overlays (optional):";
+            // 
+            // txtMpvRAOverlays
+            // 
+            this.txtMpvRAOverlays.BackColor = System.Drawing.Color.White;
+            this.txtMpvRAOverlays.ForeColor = System.Drawing.Color.Black;
+            this.txtMpvRAOverlays.Location = new System.Drawing.Point(180, 151);
+            this.txtMpvRAOverlays.Name = "txtMpvRAOverlays";
+            this.txtMpvRAOverlays.Size = new System.Drawing.Size(534, 23);
+            this.txtMpvRAOverlays.TabIndex = 8;
+            // 
+            // lblDmdRAOverlays
+            // 
+            this.lblDmdRAOverlays.AutoSize = true;
+            this.lblDmdRAOverlays.Location = new System.Drawing.Point(15, 184);
+            this.lblDmdRAOverlays.Name = "lblDmdRAOverlays";
+            this.lblDmdRAOverlays.Size = new System.Drawing.Size(83, 15);
+            this.lblDmdRAOverlays.TabIndex = 9;
+            this.lblDmdRAOverlays.Text = "DMD Overlays (optional):";
+            // 
+            // txtDmdRAOverlays
+            // 
+            this.txtDmdRAOverlays.BackColor = System.Drawing.Color.White;
+            this.txtDmdRAOverlays.ForeColor = System.Drawing.Color.Black;
+            this.txtDmdRAOverlays.Location = new System.Drawing.Point(180, 181);
+            this.txtDmdRAOverlays.Name = "txtDmdRAOverlays";
+            this.txtDmdRAOverlays.Size = new System.Drawing.Size(534, 23);
+            this.txtDmdRAOverlays.TabIndex = 10;
+            // 
+            // chk_ra_mpv_notifs
+            // 
+            this.chk_ra_mpv_notifs.AutoSize = true;
+            this.chk_ra_mpv_notifs.Location = new System.Drawing.Point(220, 25);
+            this.chk_ra_mpv_notifs.Name = "chk_ra_mpv_notifs";
+            this.chk_ra_mpv_notifs.Size = new System.Drawing.Size(130, 19);
+            this.chk_ra_mpv_notifs.TabIndex = 11;
+            this.chk_ra_mpv_notifs.Text = "Show Unlocks (MPV)";
+            this.chk_ra_mpv_notifs.UseVisualStyleBackColor = true;
+            // 
+            // chk_ra_dmd_notifs
+            // 
+            this.chk_ra_dmd_notifs.AutoSize = true;
+            this.chk_ra_dmd_notifs.Location = new System.Drawing.Point(400, 25);
+            this.chk_ra_dmd_notifs.Name = "chk_ra_dmd_notifs";
+            this.chk_ra_dmd_notifs.Size = new System.Drawing.Size(130, 19);
+            this.chk_ra_dmd_notifs.TabIndex = 12;
+            this.chk_ra_dmd_notifs.Text = "Show Unlocks (DMD)";
+            this.chk_ra_dmd_notifs.UseVisualStyleBackColor = true;
             // 
             // groupUI
             // 
@@ -1611,6 +1740,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             // groupDMDDisplay
             // 
+            this.groupDMDDisplay.Controls.Add(this.btnEditDmdLayout);
             this.groupDMDDisplay.Controls.Add(this.cboDMDFormat);
             this.groupDMDDisplay.Controls.Add(this.lblDMDFormat);
             this.groupDMDDisplay.Controls.Add(this.chkDMDCompose);
@@ -1711,6 +1841,19 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.lblDMDDotSize.TabIndex = 7;
             this.lblDMDDotSize.Text = "Virtual DMD Dot Size:";
             // 
+            // btnEditDmdLayout
+            // 
+            this.btnEditDmdLayout.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(63)))), ((int)(((byte)(63)))), ((int)(((byte)(70)))));
+            this.btnEditDmdLayout.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.btnEditDmdLayout.ForeColor = System.Drawing.Color.White;
+            this.btnEditDmdLayout.Location = new System.Drawing.Point(180, 155);
+            this.btnEditDmdLayout.Name = "btnEditDmdLayout";
+            this.btnEditDmdLayout.Size = new System.Drawing.Size(200, 30);
+            this.btnEditDmdLayout.TabIndex = 9;
+            this.btnEditDmdLayout.Text = "Edit Overlay Layout...";
+            this.btnEditDmdLayout.UseVisualStyleBackColor = false;
+            this.btnEditDmdLayout.Click += new System.EventHandler(this.btnEditDmdLayout_Click);
+            // 
             // tabScreen
             // 
             this.tabScreen.AutoScroll = true;
@@ -1744,6 +1887,9 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             // groupMPV
             // 
+            this.groupMPV.Controls.Add(this.btnEditMpvLayout);
+            this.groupMPV.Controls.Add(this.cboHwDecoding);
+            this.groupMPV.Controls.Add(this.lbl_hw_decoding);
             this.groupMPV.Controls.Add(this.btnBrowseGameStartMedia);
             this.groupMPV.Controls.Add(this.txtGameStartMediaPath);
             this.groupMPV.Controls.Add(this.lblGameStartMediaPath);
@@ -1765,7 +1911,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.groupMPV.ForeColor = System.Drawing.Color.White;
             this.groupMPV.Location = new System.Drawing.Point(13, 13);
             this.groupMPV.Name = "groupMPV";
-            this.groupMPV.Size = new System.Drawing.Size(779, 280);
+            this.groupMPV.Size = new System.Drawing.Size(779, 313);
             this.groupMPV.TabIndex = 0;
             this.groupMPV.TabStop = false;
             this.groupMPV.Text = "MPV Screen Settings";
@@ -1775,7 +1921,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.btnBrowseGameStartMedia.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(63)))), ((int)(((byte)(63)))), ((int)(((byte)(70)))));
             this.btnBrowseGameStartMedia.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnBrowseGameStartMedia.ForeColor = System.Drawing.Color.White;
-            this.btnBrowseGameStartMedia.Location = new System.Drawing.Point(650, 186);
+            this.btnBrowseGameStartMedia.Location = new System.Drawing.Point(650, 219);
             this.btnBrowseGameStartMedia.Name = "btnBrowseGameStartMedia";
             this.btnBrowseGameStartMedia.Size = new System.Drawing.Size(85, 25);
             this.btnBrowseGameStartMedia.TabIndex = 17;
@@ -1787,7 +1933,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             this.txtGameStartMediaPath.BackColor = System.Drawing.Color.White;
             this.txtGameStartMediaPath.ForeColor = System.Drawing.Color.Black;
-            this.txtGameStartMediaPath.Location = new System.Drawing.Point(180, 187);
+            this.txtGameStartMediaPath.Location = new System.Drawing.Point(180, 220);
             this.txtGameStartMediaPath.Name = "txtGameStartMediaPath";
             this.txtGameStartMediaPath.Size = new System.Drawing.Size(460, 23);
             this.txtGameStartMediaPath.TabIndex = 16;
@@ -1795,7 +1941,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // lblGameStartMediaPath
             // 
             this.lblGameStartMediaPath.AutoSize = true;
-            this.lblGameStartMediaPath.Location = new System.Drawing.Point(15, 190);
+            this.lblGameStartMediaPath.Location = new System.Drawing.Point(15, 223);
             this.lblGameStartMediaPath.Name = "lblGameStartMediaPath";
             this.lblGameStartMediaPath.Size = new System.Drawing.Size(131, 15);
             this.lblGameStartMediaPath.TabIndex = 15;
@@ -1806,7 +1952,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.btnBrowseGameCustomMarquee.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(63)))), ((int)(((byte)(63)))), ((int)(((byte)(70)))));
             this.btnBrowseGameCustomMarquee.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnBrowseGameCustomMarquee.ForeColor = System.Drawing.Color.White;
-            this.btnBrowseGameCustomMarquee.Location = new System.Drawing.Point(650, 153);
+            this.btnBrowseGameCustomMarquee.Location = new System.Drawing.Point(650, 186);
             this.btnBrowseGameCustomMarquee.Name = "btnBrowseGameCustomMarquee";
             this.btnBrowseGameCustomMarquee.Size = new System.Drawing.Size(85, 25);
             this.btnBrowseGameCustomMarquee.TabIndex = 14;
@@ -1818,7 +1964,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             this.txtGameCustomMarqueePath.BackColor = System.Drawing.Color.White;
             this.txtGameCustomMarqueePath.ForeColor = System.Drawing.Color.Black;
-            this.txtGameCustomMarqueePath.Location = new System.Drawing.Point(180, 154);
+            this.txtGameCustomMarqueePath.Location = new System.Drawing.Point(180, 187);
             this.txtGameCustomMarqueePath.Name = "txtGameCustomMarqueePath";
             this.txtGameCustomMarqueePath.Size = new System.Drawing.Size(460, 23);
             this.txtGameCustomMarqueePath.TabIndex = 13;
@@ -1826,7 +1972,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // lblGameCustomMarqueePath
             // 
             this.lblGameCustomMarqueePath.AutoSize = true;
-            this.lblGameCustomMarqueePath.Location = new System.Drawing.Point(15, 157);
+            this.lblGameCustomMarqueePath.Location = new System.Drawing.Point(15, 190);
             this.lblGameCustomMarqueePath.Name = "lblGameCustomMarqueePath";
             this.lblGameCustomMarqueePath.Size = new System.Drawing.Size(163, 15);
             this.lblGameCustomMarqueePath.TabIndex = 12;
@@ -1837,7 +1983,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.btnBrowseSystemCustomMarquee.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(63)))), ((int)(((byte)(63)))), ((int)(((byte)(70)))));
             this.btnBrowseSystemCustomMarquee.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnBrowseSystemCustomMarquee.ForeColor = System.Drawing.Color.White;
-            this.btnBrowseSystemCustomMarquee.Location = new System.Drawing.Point(650, 120);
+            this.btnBrowseSystemCustomMarquee.Location = new System.Drawing.Point(650, 153);
             this.btnBrowseSystemCustomMarquee.Name = "btnBrowseSystemCustomMarquee";
             this.btnBrowseSystemCustomMarquee.Size = new System.Drawing.Size(85, 25);
             this.btnBrowseSystemCustomMarquee.TabIndex = 11;
@@ -1849,7 +1995,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // 
             this.txtSystemCustomMarqueePath.BackColor = System.Drawing.Color.White;
             this.txtSystemCustomMarqueePath.ForeColor = System.Drawing.Color.Black;
-            this.txtSystemCustomMarqueePath.Location = new System.Drawing.Point(180, 121);
+            this.txtSystemCustomMarqueePath.Location = new System.Drawing.Point(180, 154);
             this.txtSystemCustomMarqueePath.Name = "txtSystemCustomMarqueePath";
             this.txtSystemCustomMarqueePath.Size = new System.Drawing.Size(460, 23);
             this.txtSystemCustomMarqueePath.TabIndex = 10;
@@ -1857,7 +2003,7 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             // lblSystemCustomMarqueePath
             // 
             this.lblSystemCustomMarqueePath.AutoSize = true;
-            this.lblSystemCustomMarqueePath.Location = new System.Drawing.Point(15, 124);
+            this.lblSystemCustomMarqueePath.Location = new System.Drawing.Point(15, 157);
             this.lblSystemCustomMarqueePath.Name = "lblSystemCustomMarqueePath";
             this.lblSystemCustomMarqueePath.Size = new System.Drawing.Size(170, 15);
             this.lblSystemCustomMarqueePath.TabIndex = 9;
@@ -1938,6 +2084,19 @@ namespace RetroBatMarqueeManager.Launcher.Forms
             this.lblMPVPath.Size = new System.Drawing.Size(62, 15);
             this.lblMPVPath.TabIndex = 0;
             this.lblMPVPath.Text = "MPV Path:";
+            // 
+            // btnEditMpvLayout
+            // 
+            this.btnEditMpvLayout.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(63)))), ((int)(((byte)(63)))), ((int)(((byte)(70)))));
+            this.btnEditMpvLayout.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.btnEditMpvLayout.ForeColor = System.Drawing.Color.White;
+            this.btnEditMpvLayout.Location = new System.Drawing.Point(180, 260);
+            this.btnEditMpvLayout.Name = "btnEditMpvLayout";
+            this.btnEditMpvLayout.Size = new System.Drawing.Size(200, 30);
+            this.btnEditMpvLayout.TabIndex = 18;
+            this.btnEditMpvLayout.Text = "Edit Overlay Layout...";
+            this.btnEditMpvLayout.UseVisualStyleBackColor = false;
+            this.btnEditMpvLayout.Click += new System.EventHandler(this.btnEditMpvLayout_Click);
             // 
             // tabPinball
             // 
@@ -2347,6 +2506,8 @@ namespace RetroBatMarqueeManager.Launcher.Forms
         private System.Windows.Forms.Label lblVideoFolder;
         private System.Windows.Forms.ComboBox cboVideoGeneration;
         private System.Windows.Forms.Label lblVideoGeneration;
+        private System.Windows.Forms.ComboBox cboFfmpegHwEncoding;
+        private System.Windows.Forms.Label lbl_ffmpeg_hw_encoding;
         private System.Windows.Forms.CheckBox chkAutoConvert;
         private System.Windows.Forms.ComboBox cboLayout;
         private System.Windows.Forms.Label lblLayout;
@@ -2363,6 +2524,14 @@ namespace RetroBatMarqueeManager.Launcher.Forms
         private System.Windows.Forms.TextBox txtRAApiKey;
         private System.Windows.Forms.Label lblRAApiKey;
         private System.Windows.Forms.CheckBox chkRAEnable;
+        private System.Windows.Forms.TextBox txtMpvRAOverlays;
+        private System.Windows.Forms.Label lblMpvRAOverlays;
+        private System.Windows.Forms.TextBox txtDmdRAOverlays;
+        private System.Windows.Forms.Label lblDmdRAOverlays;
+        private System.Windows.Forms.Button btnEditDmdLayout;
+        private System.Windows.Forms.Button btnEditMpvLayout;
+        private System.Windows.Forms.CheckBox chk_ra_mpv_notifs;
+        private System.Windows.Forms.CheckBox chk_ra_dmd_notifs;
         private System.Windows.Forms.GroupBox groupUI;
         private System.Windows.Forms.TextBox txtAcceptedFormats;
         private System.Windows.Forms.Label lblAcceptedFormats;
@@ -2444,6 +2613,8 @@ namespace RetroBatMarqueeManager.Launcher.Forms
         private System.Windows.Forms.Label lblSystemCustomMarqueePath;
         private System.Windows.Forms.TextBox txtScreenNumber;
         private System.Windows.Forms.Label lblScreenNumber;
+        private System.Windows.Forms.ComboBox cboHwDecoding;
+        private System.Windows.Forms.Label lbl_hw_decoding;
         private System.Windows.Forms.TextBox txtMarqueeHeight;
         private System.Windows.Forms.Label lblMarqueeHeight;
         private System.Windows.Forms.TextBox txtMarqueeWidth;

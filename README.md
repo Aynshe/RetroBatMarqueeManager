@@ -7,6 +7,7 @@ Original Project: [https://github.com/Nelfe80/MarqueeManager](https://github.com
 
 *   **Dynamic Marquee Display**: Automatically displays marquees for Systems, Collections, and Games on a second screen.
 *   **Smart Composition**: If no specific marquee is found, it automatically composes one using the Game Logo + Fanart Background.
+*   **Overlay Designer**: Built-in WYSIWYG editor to customize RetroAchievements overlays (DMD/MPV) and layout positions.
 *   **Media Support**: Supports PNG, JPG, SVG, and MP4/Video animations via MPV.
 *   **Live Real-Time Editor**: Adjust the position of your marquees directly on the screen while the game is running.
 *   **User-Friendly Configuration**: Dedicated UI for easy setup.
@@ -22,6 +23,15 @@ You can access the configuration interface in two ways:
     ```
 
 > On the first run (if no `config.ini` exists), the configuration menu will open automatically.
+
+## Overlay Designer
+
+The manager includes a visual **Overlay Designer** to customize the appearance of RetroAchievements overlays:
+
+1.  Open the **RetroBat Marquee Manager Launcher**.
+2.  Click on **Design Overlays**.
+3.  Adjust positions, sizes, colors, and font sizes for both DMD and MPV displays.
+4.  Use **Live Preview** to see changes instantly on your second screen or DMD hardware.
 
 ## Live Editor Controls (In-Game)
 
@@ -80,21 +90,32 @@ Edit `config.ini` in the plugin folder to customize behavior.
 
 Display live achievement progress overlays on both MPV and DMD displays.
 
-### Supported Emulators
+### Supported Emulators & Modes
 
-*   **RetroArch (Libretro)**: Automatic detection via `es_launch_stdout.log`.
-*   **PCSX2**: Automatic detection via `emulog.txt`.
-*   **Other Emulators**: Designed to be extensible via log pattern matching.
+Full support for **Softcore** and **Hardcore** modes across the following systems:
+
+*   **RetroArch (Libretro)**: Automatic detection via `es_launch_stdout.log` (All cores).
+*   **PCSX2 (Standalone)**: Automatic detection via `emulog.txt`.
+*   **DuckStation (Standalone)**: Automatic detection via `duckstation.log`.
+*   **Dolphin (Standalone)**: Automatic detection via `dolphin.log`.
+*   **PPSSPP (Standalone)**: Automatic detection via `log.txt`.
+
+> **Hardcore Mode**: Automatically detects if Hardcore Mode is enabled in the emulator.
+> *   Displays a distinct **"HC"** indicator on the Marquee.
+> *   Validates achievements against the Hardcore leaderboard dates.
+> *   Uses specific visual styling (Gold borders/overlays).
 
 ### Features
 
 *   **Score Overlay**: Shows current points / total points (e.g. "250/1000 pts")
 *   **Achievement Count**: Shows unlocked / total achievements (e.g. "5/35")
 *   **Badge Ribbon**: Displays earned achievement badges in a scrolling ribbon
-    *   **DMD**: Groups of 4 badges, cycles every 5s with 10s pause
-    *   **MPV**: Groups of ~29 badges, cycles every 5s with 2s pause
+    *   **DMD**: Smoothly cycling achievement ribbon (automatically optimized for DMD resolution)
+    *   **MPV**: High-resolution achievement ribbon (dynamically scaled for the marquee)
 *   **Notifications**: Full-screen achievement unlock animations with cup + badge
+*   **Scrolling Narration**: Supports long narrative text with automatic scrolling on both DMD and MPV.
 *   **Auto-Refresh**: All overlays update immediately when achievements unlock
+*   **Smart Cache**: Automatic cleanup of temporary files and expired preview data.
 
 ### Configuration
 
@@ -133,6 +154,10 @@ MarqueeRetroAchievementsOverlays=score,badges,count
 - Unlocked badges display in color
 - Locked badges display as grayscale with 50% opacity
 - Badges sorted by DisplayOrder (RetroAchievements API)
+
+**Custom Styling**:
+- **DMD Narration**: Uses the same logic as scrolling text. You can customize `TextColor` and `FontSize` in the Overlay Designer (item `rp_narration`).
+- **MPV Narration**: Includes a semi-transparent background box and scrolling support for long text.
 
 ### Tiered Image Resolution (Icons & Badges)
 

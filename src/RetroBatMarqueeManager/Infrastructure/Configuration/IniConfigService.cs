@@ -15,6 +15,27 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
             _iniPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.ini");
             _settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             LoadConfig();
+            MigrateOverlayTemplate();
+        }
+
+        private void MigrateOverlayTemplate()
+        {
+            try
+            {
+                string oldPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config", "overlays.json");
+                string newPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "overlays.json");
+
+                if (File.Exists(oldPath) && !File.Exists(newPath))
+                {
+                    _logger?.LogInformation($"[Migration] Moving overlay template from {oldPath} to {newPath}");
+                    File.Move(oldPath, newPath);
+                    // Optional: remove config folder if empty? (Better not to touch other files)
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError($"[Migration] Failed to migrate overlay template: {ex.Message}");
+            }
         }
 
         public string GetSetting(string key, string defaultValue = "") 
@@ -81,6 +102,10 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
         // PCSX2 Paths
         public string Pcsx2LogPath => Path.Combine(RetroBatPath, "emulators", "pcsx2", "logs", "emulog.txt");
         public string Pcsx2BadgeCachePath => Path.Combine(RetroBatPath, "emulators", "pcsx2", "cache", "achievement_images");
+
+        // DuckStation Paths
+        public string DuckStationLogPath => Path.Combine(RetroBatPath, "emulators", "duckstation", "duckstation.log");
+        public string DuckStationSettingsPath => Path.Combine(RetroBatPath, "emulators", "duckstation", "settings.ini");
 
         public string[] AcceptedFormats => GetValue("AcceptedFormats", "mp4,gif,jpg,png,svg").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         
@@ -168,10 +193,65 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
         
         // RetroAchievements Settings
         // EN: Web API Key from https://retroachievements.org/settings / FR: Clé Web API depuis https://retroachievements.org/settings
+        public bool MpvRetroAchievementsNotifications => GetValue("MpvRetroAchievementsNotifications", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
+        public bool DmdRetroAchievementsNotifications => GetValue("DmdRetroAchievementsNotifications", "true").Equals("true", StringComparison.OrdinalIgnoreCase);
         public string? RetroAchievementsWebApiKey => GetValue("RetroAchievementsWebApiKey", "");
-        public string MarqueeRetroAchievementsOverlays => GetValue("MarqueeRetroAchievementsOverlays", "score,badges,count");
+        public string MarqueeRetroAchievementsOverlays => GetValue("MarqueeRetroAchievementsOverlays", "score,badges,count,items,challenge");
+        public string MpvRetroAchievementsOverlays 
+        {
+            get
+            {
+                var val = GetValue("MpvRetroAchievementsOverlays", "");
+                return string.IsNullOrWhiteSpace(val) ? MarqueeRetroAchievementsOverlays : val;
+            }
+        }
+        public string DmdRetroAchievementsOverlays 
+        {
+            get
+            {
+                var val = GetValue("DmdRetroAchievementsOverlays", "");
+                return string.IsNullOrWhiteSpace(val) ? MarqueeRetroAchievementsOverlays : val;
+            }
+        }
         public string MarqueeRetroAchievementsDisplayTarget => GetValue("MarqueeRetroAchievementsDisplayTarget", "both").ToLowerInvariant();
-        public string RAFontFamily => GetValue("RAFontFamily", "Arial");
+        public string RAFontFamily 
+        {
+            get
+            {
+                var val = GetValue("RAFontFamily", "");
+                // EN: If user specified something indicating a preference (not default Arial), respect it?
+                // FR: Si l'utilisateur a spécifié quelque chose (pas Arial par défaut), on respecte ?
+                // The user requested: "if not set, use the first available in retroachievements\fonts"
+                // So if it IS "Arial", we check if we have a better custom font available.
+                
+                if (!string.IsNullOrEmpty(val) && !val.Equals("Arial", StringComparison.OrdinalIgnoreCase))
+                {
+                    return val;
+                }
+
+                try 
+                {
+                    // Search in retroachievements/fonts
+                    // Path relative to AppDomain or MarqueeImagePath? User said "retroachievements\fonts"
+                    // We assume AppDomain root structure based on "native root" comment
+                    var fontDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "retroachievements", "fonts");
+                    if (Directory.Exists(fontDir))
+                    {
+                        var fontFile = Directory.GetFiles(fontDir, "*.ttf").FirstOrDefault() ?? 
+                                       Directory.GetFiles(fontDir, "*.otf").FirstOrDefault();
+                        
+                        if (!string.IsNullOrEmpty(fontFile))
+                        {
+                            return fontFile; // Return absolute path
+                        }
+                    }
+                }
+                catch {}
+
+                return "Arial"; // Fallback
+            }
+        }
+        public string OverlayTemplatePath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "overlays.json");
         public string ScreenScraperCachePath => Path.Combine(MarqueeImagePath, "screenscraper");
         public int ScreenScraperThreads => int.TryParse(GetValue("ScreenScraperThreads", "1"), out var ssThreads) ? Math.Max(1, ssThreads) : 1;
         
@@ -552,6 +632,11 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 // RetroAchievements (NEW)
                 { "RetroAchievementsWebApiKey", "" },
                 { "MarqueeRetroAchievementsDisplayTarget", "both" },
+                { "MarqueeRetroAchievementsOverlays", "score,badges,count,items,challenge" },
+                { "MpvRetroAchievementsOverlays", "" },
+                { "DmdRetroAchievementsOverlays", "" },
+                { "RAFontFamily", "" },
+
                 
                 // Collections
                 { "CollectionCorrelation", "all:allgames,favorites:favorites,windowsgames:windows,2players:auto-at2players,4players:auto-at4players,zsegastv:segastv,ztaito:taito,zgaelco:gaelco,recent:auto-lastplayed,vertical:auto-verticalarcade,zmodel2:model2,zmodel3:model3,zcps1:cps1,zsega:sega" },
@@ -661,6 +746,11 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 // RetroAchievements
                 _settings["RetroAchievementsWebApiKey"] = "";
                 _settings["MarqueeRetroAchievementsDisplayTarget"] = "both";
+                _settings["MarqueeRetroAchievementsOverlays"] = "score,badges,count,items,challenge";
+                _settings["MpvRetroAchievementsOverlays"] = "";
+                _settings["DmdRetroAchievementsOverlays"] = "";
+                _settings["RAFontFamily"] = "";
+
 
                 // DMD
                 _settings["DmdEnabled"] = "false";
@@ -727,10 +817,18 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                 sb.AppendLine("; Options: both | mpv | dmd");
                 WriteKey(sb, "MarqueeRetroAchievementsDisplayTarget", "both");
 
-                sb.AppendLine("; Options: score,badges,count");
-                WriteKey(sb, "MarqueeRetroAchievementsOverlays", "score,badges,count");
+                sb.AppendLine("; Options: score,badges,count,items,challenge");
+                WriteKey(sb, "MarqueeRetroAchievementsOverlays", "score,badges,count,items,challenge");
+                sb.AppendLine("; Specific overlays for MPV/DMD (if empty, uses MarqueeRetroAchievementsOverlays)");
+                WriteKey(sb, "MpvRetroAchievementsOverlays", "");
+                WriteKey(sb, "DmdRetroAchievementsOverlays", "");
+                sb.AppendLine("; Display Achievements/Challenges popups on MPV or DMD");
+                WriteKey(sb, "MpvRetroAchievementsNotifications", "true");
+                WriteKey(sb, "DmdRetroAchievementsNotifications", "true");
                 sb.AppendLine("; Generate your Web API Key at: https://retroachievements.org/settings");
-                WriteKey(sb, "RetroAchievementsWebApiKey", "");
+            WriteKey(sb, "RetroAchievementsWebApiKey", "");
+            WriteKey(sb, "RAFontFamily", "");
+
                 
                 WriteKey(sb, "MinimizeToTray", "true");
                 
@@ -860,9 +958,9 @@ namespace RetroBatMarqueeManager.Infrastructure.Configuration
                     "pinballfx", "pinballfx2", "pinballfx3", "fpinball", "zaccariapinball", "custom1",
                     "MPVScrapMediaType", "DMDScrapMediaType", "ScreenScraperUser", "ScreenScraperPass", "ScreenScraperDevId", "ScreenScraperDevPassword", "MarqueeGlobalScraping", "ScreenScraperThreads",
                     "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
-                    "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
-                    "ScreenScraperQueueLimit", "ScreenScraperQueueKeep",
                     "RetroAchievementsWebApiKey", "GenerateMarqueeVideoFolder", "FfmpegHwEncoding", "MarqueeRetroAchievementsOverlays", "RAFontFamily", "PrioritySource", "ArcadeItaliaUrl", "ArcadeItaliaMediaType", "MarqueeRetroAchievementsDisplayTarget",
+                    "MpvRetroAchievementsOverlays", "DmdRetroAchievementsOverlays",
+                    "MpvRetroAchievementsNotifications", "DmdRetroAchievementsNotifications",
                     "HwDecoding"
                 };
 

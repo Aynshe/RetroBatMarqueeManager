@@ -26,6 +26,8 @@ namespace RetroBatMarqueeManager.Infrastructure.Api
         private readonly string _gameImagesCacheDir;
         private readonly string _userImagesCacheDir;
 
+        public string BadgeCachePath => _badgesCacheDir;
+
         public RetroAchievementsApiClient(
             HttpClient httpClient,
             IConfigService config,
@@ -380,6 +382,24 @@ namespace RetroBatMarqueeManager.Infrastructure.Api
                         if (localPath != null)
                         {
                             achievement.BadgeName = localPath;
+                        }
+                    }
+                }
+            }
+
+            // EN: Download leaderboard badges
+            // FR: Télécharger badges des leaderboards
+            if (progress?.Leaderboards != null)
+            {
+                foreach (var lb in progress.Leaderboards)
+                {
+                    if (!string.IsNullOrEmpty(lb.BadgeName))
+                    {
+                        var badgeUrl = $"/Badge/{lb.BadgeName}.png";
+                        var localPath = await DownloadImageAsync(badgeUrl, "badge", gameId);
+                        if (localPath != null)
+                        {
+                            lb.BadgeName = localPath;
                         }
                     }
                 }

@@ -283,7 +283,16 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                 // EN: Send explicit clear command to Lua script
                 // FR: Envoyer une commande d'effacement explicite au script Lua
                 ExecuteCommand(new[] { "script-message", "push-ra", "clear" });
-                _logger.LogInformation("[MPV] Sent Clear RA Data command");
+                
+                // EN: ALSO explicitly remove filter-based overlays (used for achievements)
+                // FR: AUSSI supprimer explicitement les overlays basés sur des filtres (utilisés pour les succès)
+                // Slots: 1 (Persistent), 3 (Stats), 4 (Achievement), 5 (Challenge)
+                ExecuteCommand(new[] { "vf", "remove", "@ra_overlay_1" });
+                ExecuteCommand(new[] { "vf", "remove", "@ra_overlay_3" });
+                ExecuteCommand(new[] { "vf", "remove", "@ra_overlay_4" });
+                ExecuteCommand(new[] { "vf", "remove", "@ra_overlay_5" });
+
+                _logger.LogInformation("[MPV] Sent Clear RA Data command and removed filter overlays");
             }
             catch (Exception ex)
             {
@@ -334,7 +343,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                 _overlayCts?.Cancel();
                 _overlayCts = new CancellationTokenSource();
 
-                int nextSlot = (_currentOverlaySlot == 1) ? 2 : 1;
+                int nextSlot = (_currentOverlaySlot == 10) ? 11 : 10;
                 string currentLabel = $"@ra_overlay_{_currentOverlaySlot}";
                 string nextLabel = $"@ra_overlay_{nextSlot}";
                 
@@ -343,6 +352,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                 string overlayPosition;
                 if (position == "bottom-left") overlayPosition = "0:main_h-overlay_h";
                 else if (position == "top-left") overlayPosition = "0:0";
+                else if (position == "center") overlayPosition = "(main_w-overlay_w)/2:(main_h-overlay_h)/2";
                 else overlayPosition = "main_w-overlay_w-20:20"; // top-right with margin
                 
                 int w = _config.MarqueeWidth;
@@ -388,7 +398,7 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
              // 1. Show Cup
              if (!string.IsNullOrEmpty(cupPath) && File.Exists(cupPath))
              {
-                 await ShowOverlay(cupPath, cupDuration + 500); 
+                 await ShowOverlay(cupPath, cupDuration + 500, "center"); 
                  await Task.Delay(cupDuration);
              }
              
@@ -416,6 +426,80 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
              }
              catch { }
              return Task.CompletedTask;
+        }
+
+        public Task OverlayImage(string imagePath, int id, string position = "top-left")
+        {
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return Task.CompletedTask;
+
+            try
+            {
+                var label = $"@ra_overlay_{id}";
+                var safePath = imagePath.Replace("\\", "/"); 
+                
+                // Assuming full screen overlay matching marquee resolution
+                int w = _config.MarqueeWidth;
+                int h = _config.MarqueeHeight;
+
+                // 1. Remove existing overlay with same ID if exists (to update it)
+                ExecuteCommand(new[] { "vf", "remove", label });
+
+                // 2. Add new overlay
+                string overlayPosition;
+                if (position == "bottom-left") overlayPosition = "0:main_h-overlay_h";
+                else if (position == "top-left") overlayPosition = "0:0";
+                else overlayPosition = "main_w-overlay_w-20:20"; // top-right with margin
+                
+                // Create filter graph that scales input video to marquee size and overlays the image
+                var filterGraph = $"[in]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}:(iw-ow)/2:(ih-oh)/2[bg];movie=\\'{safePath}\\'[logo];[bg][logo]overlay={overlayPosition}[out]";
+
+                var commandArg = $"{label}:lavfi=[{filterGraph}]";
+                if (id == 4 || id == 3) _logger.LogInformation($"[MpvController] Adding persistent overlay {id}: {commandArg}");
+                
+                CheckError(LibMpvNative.Command(_mpvHandle, new[] { "vf", "add", commandArg }));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[MPV] Error OverlayImage {id}: {ex.Message}");
+            }
+            return Task.CompletedTask;
+        }
+
+        public Task RemoveOverlay(int id, bool cancelTimer = false)
+        {
+             if (!_isInitialized || _mpvHandle == IntPtr.Zero) return Task.CompletedTask;
+             try
+             {
+                if (cancelTimer) _overlayCts?.Cancel();
+                var label = $"@ra_overlay_{id}";
+                ExecuteCommand(new[] { "vf", "remove", label });
+                
+                // EN: If we explicitly remove the current active slot, reset it
+                // FR: Si on supprime explicitement le slot actif, le réinitialiser
+                if (id == _currentOverlaySlot) _currentOverlaySlot = 0;
+             }
+             catch { }
+             return Task.CompletedTask;
+        }
+
+        public async Task RefreshPlayer()
+        {
+            if (!_isInitialized || _mpvHandle == IntPtr.Zero) return;
+            try
+            {
+                // EN: Force a frame step to redraw OSD/Overlays even if static
+                // FR: Forcer un pas d'image pour redessiner l'OSD/Overlays même si statique
+                LibMpvNative.Command(_mpvHandle, new[] { "frame-step" });
+                
+                // EN: Ensure strictly unpaused
+                // FR: S'assurer strictement que la pause est désactivée
+                CheckError(LibMpvNative.mpv_set_property_string(_mpvHandle, "pause", "no"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[MPV] RefreshPlayer error: {ex.Message}");
+            }
+            await Task.CompletedTask;
         }
 
         public void Dispose()

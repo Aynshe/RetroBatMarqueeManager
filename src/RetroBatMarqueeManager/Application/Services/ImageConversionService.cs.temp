@@ -1,0 +1,91 @@
+
+        /// <summary>
+        /// EN: Generate a scrolling text GIF for MPV using FFmpeg
+        /// FR: Générer un GIF de texte défilant pour MPV via FFmpeg
+        /// </summary>
+        private string GenerateScrollingTextGif(string text, Font font, int width, int height, Color bgColor, Color textColor)
+        {
+            try
+            {
+                string tempDir = Path.Combine(_config.TempPath, $"gif_frames_{DateTime.Now.Ticks}");
+                Directory.CreateDirectory(tempDir);
+
+                using (var dummyBmp = new Bitmap(1, 1))
+                using (var g = Graphics.FromImage(dummyBmp))
+                {
+                    var textSize = g.MeasureString(text, font);
+                    int textWidth = (int)textSize.Width;
+                    
+                    // Logic: Scroll from Right edge to Left edge completely
+                    // Frame count depends on speed. let's say 4 pixels per frame?
+                    int speed = 4;
+                    int totalFrames = (width + textWidth) / speed;
+                    
+                    // Cap frames to avoid huge files (e.g. max 150 frames ~ 5-10 sec)
+                    if (totalFrames > 300) { speed *= 2; totalFrames = (width + textWidth) / speed; }
+
+                    using (var brushBg = new SolidBrush(bgColor))
+                    using (var brushText = new SolidBrush(textColor))
+                    {
+                        var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center };
+                        
+                        for (int i = 0; i < totalFrames; i++)
+                        {
+                            using (var frame = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                            using (var gf = Graphics.FromImage(frame))
+                            {
+                                gf.Clear(Color.Transparent);
+                                gf.FillRectangle(brushBg, 0, 0, width, height);
+                                
+                                // Draw Border frame (MPV style)
+                                using (var pen = new Pen(Color.Silver, 2))
+                                {
+                                    gf.DrawRectangle(pen, 0, 0, width, height);
+                                }
+
+                                int x = width - (i * speed);
+                                RectangleF rect = new RectangleF(x, 0, textWidth + 10, height);
+                                
+                                gf.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                                gf.DrawString(text, font, brushText, rect, format);
+                                
+                                frame.Save(Path.Combine(tempDir, $"frame_{i:000}.png"), ImageFormat.Png);
+                            }
+                        }
+                    }
+                }
+
+                // Call FFmpeg to make GIF
+                string ffmpegPath = FindFfmpeg();
+                if (string.IsNullOrEmpty(ffmpegPath)) return string.Empty;
+
+                string gifPath = Path.Combine(_config.CachePath, $"scrolling_rp_{DateTime.Now.Ticks}.gif");
+                
+                // ffmpeg -framerate 30 -i frame_%03d.png -vf "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" output.gif
+                string args = $"-y -framerate 30 -i \"{Path.Combine(tempDir, "frame_%03d.png")}\" -vf \"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{gifPath}\"";
+                
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using (var proc = Process.Start(startInfo))
+                {
+                    proc.WaitForExit(10000); // 10s max
+                }
+
+                try { Directory.Delete(tempDir, true); } catch { }
+
+                return File.Exists(gifPath) ? gifPath : string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Failed to generate scrolling GIF: {ex.Message}");
+                return string.Empty;
+            }
+        }

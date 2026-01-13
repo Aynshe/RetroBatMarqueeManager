@@ -46,12 +46,17 @@ lbl_layout=Marquee Layout
 lbl_auto_convert=Auto Convert Images
 lbl_video_generation=Video Generation
 lbl_video_folder=Video Generation Folder
+lbl_ffmpeg_hw_encoding=FFmpeg HW Encoding
 
 group_retroachievements=RetroAchievements
 lbl_ra_enable=Enable RetroAchievements
 lbl_ra_api_key=Web API Key
 lbl_ra_display_target=Display Target
 lbl_ra_overlays=Overlay Types
+lbl_ra_mpv_overlays=MPV Overlays (optional)
+lbl_ra_dmd_overlays=DMD Overlays (optional)
+chk_ra_mpv_notifs=Show Unlocks (MPV)
+chk_ra_dmd_notifs=Show Unlocks (DMD)
 
 group_ui=User Interface
 lbl_minimize_tray=Minimize to System Tray
@@ -107,6 +112,7 @@ lbl_screen_number=Screen Number
 lbl_screen_system_path=System Custom Marquee Path
 lbl_screen_game_path=Game Custom Marquee Path
 lbl_screen_gamestart_path=Game Start Media Path
+lbl_hw_decoding=Hardware Decoding
 
 # Pinball Tab
 group_pinball=Pinball System Commands
@@ -126,6 +132,7 @@ tip_background_color=Color name (Black, White, etc.) or hex code
 tip_compose_media=fanart or image (boxart/screenshot)
 tip_layout=standard, gradient-left, gradient-right, or gradient-standard
 tip_autostart=false (disabled), windows (Windows Startup), or retrobat (RetroBat script)
+tip_ffmpeg_hw_encoding=Acceleration for video generation (empty=software, nvenc=Nvidia, amf=AMD, qsv=Intel)
 tip_ra_api_key=Get your API key from https://retroachievements.org/settings
 tip_ra_display_target=both, mpv, or dmd
 tip_ra_overlays=Comma-separated: score,badges,count
@@ -133,6 +140,7 @@ tip_ss_threads=Number of concurrent scraping threads (1 for basic accounts)
 tip_dmd_model=virtual, virtualdmd, pin2dmd, zedmd, etc.
 tip_dmd_format=rgb24, gray2, gray4, coloredgray2, coloredgray4, coloredgray6
 tip_screen_number=0=Primary, 1=Secondary, etc.
+tip_hw_decoding=Acceleration for video playback (auto, d3d11va, dxva2, no)
 
 # Messages
 msg_save_success=Configuration saved successfully!

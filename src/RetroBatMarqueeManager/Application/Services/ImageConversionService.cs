@@ -1,4 +1,4 @@
-using RetroBatMarqueeManager.Core.Interfaces;
+﻿using RetroBatMarqueeManager.Core.Interfaces;
 using RetroBatMarqueeManager.Core.Models.RetroAchievements;
 using System.Diagnostics;
 using System.Drawing;
@@ -14,12 +14,19 @@ namespace RetroBatMarqueeManager.Application.Services
         private readonly IConfigService _config;
         private readonly IProcessService _processService;
         private readonly ILogger<ImageConversionService> _logger;
+        private readonly IOverlayTemplateService _templateService;
+        
+        // EN: Cache for DMD scrolling text frames to avoid redundant CPU usage
+        // FR: Cache pour les frames de texte défilant DMD afin d'éviter une utilisation CPU redondante
+        private static readonly Dictionary<string, List<byte[]>> _dmdFramesCache = new Dictionary<string, List<byte[]>>();
+        private static readonly SemaphoreSlim _gifGenerationLock = new SemaphoreSlim(1, 1);
 
-        public ImageConversionService(IConfigService config, IProcessService processService, ILogger<ImageConversionService> logger)
+        public ImageConversionService(IConfigService config, IProcessService processService, ILogger<ImageConversionService> logger, IOverlayTemplateService templateService)
         {
             _config = config;
             _processService = processService;
             _logger = logger;
+            _templateService = templateService;
             
             EnsureCacheDirectory();
         }
@@ -59,7 +66,7 @@ namespace RetroBatMarqueeManager.Application.Services
             }
 
             // EN: Check Config: If AutoConvert is disabled AND it's not an SVG (SVGs always need conversion), return original
-            // FR: Vérifier Config: Si AutoConvert est désactivé ET ce n'est pas un SVG (les SVG nécessitent toujours une conversion), retourner l'original
+            // FR: VÃ©rifier Config: Si AutoConvert est dÃ©sactivÃ© ET ce n'est pas un SVG (les SVG nÃ©cessitent toujours une conversion), retourner l'original
             if (!_config.MarqueeAutoConvert && ext != "svg")
             {
                 return sourcePath;
@@ -197,9 +204,9 @@ namespace RetroBatMarqueeManager.Application.Services
         
        /// <summary>
         /// Processes an image for DMD (128x32 usually)
-        /// FR: Traite une image pour le DMD (128x32 généralement)
+        /// FR: Traite une image pour le DMD (128x32 gÃ©nÃ©ralement)
         /// </summary>
-        public string? ProcessDmdImage(string sourcePath, string subFolder, string? system = null, string? gameName = null, int offsetX = 0, int offsetY = 0)
+        public string? ProcessDmdImage(string sourcePath, string subFolder, string? system = null, string? gameName = null, int offsetX = 0, int offsetY = 0, bool isHardcore = false, bool forceRegenerate = false)
         {
             if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath)) return sourcePath;
             var ext = Path.GetExtension(sourcePath).TrimStart('.').ToLowerInvariant();
@@ -212,7 +219,13 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                  gameName = Path.GetFileNameWithoutExtension(sourcePath);
             }
-            string sanitizedName = Sanitize(gameName);
+            // UN-SANITIZED FILENAME for cache consistency with Composition logic
+            // DMD drivers on Windows generally handle spaces/parens fine in file paths if quoted.
+            // Previous aggressive sanitization caused mismatch (WipEout_Pure vs WipEout Pure...).
+            string safeName = gameName; // Use the name as is (Windows file system allows spaces/parens)
+            
+            // Only strip characters that are ILLEGAL on filesystem
+            foreach (var c in Path.GetInvalidFileNameChars()) safeName = safeName.Replace(c, '_');
 
             // User Request: medias\cache\dmd\[GenerateMarqueeVideoFolder]\[system]\[GameName].gif
             // _config.CachePath is .../medias/_cache
@@ -247,13 +260,14 @@ namespace RetroBatMarqueeManager.Application.Services
 
             // If video, target is GIF. If static, target is PNG.
             string targetExt = isVideo ? ".gif" : ".png";
-            string uniqueName = $"{sanitizedName}{targetExt}";
+            string suffix = isHardcore ? "_hc" : "";
+            string uniqueName = $"{safeName}{suffix}{targetExt}";
             string targetPath = Path.Combine(dmdCacheDir, uniqueName);
 
-            if (File.Exists(targetPath))
+            if (!forceRegenerate && File.Exists(targetPath))
             {
                  // EN: Optimization for System Logos - trust cache if exists (skip timestamp check to avoid latency)
-                 // FR: Optimisation pour logos système - faire confiance au cache s'il existe (sauter vérif date)
+                 // FR: Optimisation pour logos systÃ¨me - faire confiance au cache s'il existe (sauter vÃ©rif date)
                  // System logos are unlikely to change frequently.
                  bool isSystemLogo = !isVideo && (subFolder == "systems" || (system != null && subFolder != "overlays" && subFolder != "generated_videos")); 
 
@@ -300,7 +314,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 return null;
             }
 
-            return ConvertDmdImage(sourcePath, targetPath) ? targetPath : sourcePath;
+            return ConvertDmdImage(sourcePath, targetPath, isHardcore) ? targetPath : sourcePath;
         }
 
         private string? _ffmpegPath = null;
@@ -378,7 +392,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 
                 foreach(var arg in args) startInfo.ArgumentList.Add(arg);
                 
-                // FR: Mise à jour du log pour refléter la réalité (High Quality)
+                // FR: Mise Ã  jour du log pour reflÃ©ter la rÃ©alitÃ© (High Quality)
                 _logger.LogInformation($"Converting Video to GIF (High Quality): {source} -> {target}");
                 
                 using var process = new Process { StartInfo = startInfo };
@@ -433,7 +447,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
         /// <summary>
         /// Generates a Marquee-style video (Wide) from a standard game video by cropping and overlaying the logo.
-        /// FR: Génère une vidéo format Marquee (Large) depuis une vidéo standard en tronquant et superposant le logo.
+        /// FR: GÃ©nÃ¨re une vidÃ©o format Marquee (Large) depuis une vidÃ©o standard en tronquant et superposant le logo.
         /// </summary>
         public string? GenerateMarqueeVideo(string sourceVideo, string logoPath, string system, string gameName)
         {
@@ -609,7 +623,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
         /// <summary>
         /// EN: Generate marquee video with custom offsets for crop/zoom/logo position
-        /// FR: Générer vidéo marquee avec offsets personnalisés pour crop/zoom/position logo
+        /// FR: GÃ©nÃ©rer vidÃ©o marquee avec offsets personnalisÃ©s pour crop/zoom/position logo
         /// </summary>
         public string? GenerateMarqueeVideoWithOffsets(string sourceVideo, string logoPath, string system, string gameName, 
             int cropX, int cropY, double zoom, int logoX, int logoY, double logoScale, 
@@ -640,7 +654,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 var mh = _config.MarqueeHeight;
 
                 // EN: Calculate crop position with offsets - default is (iw-ow)/2:(ih-oh)*0.4
-                // FR: Calculer position crop avec offsets - défaut est (iw-ow)/2:(ih-oh)*0.4
+                // FR: Calculer position crop avec offsets - dÃ©faut est (iw-ow)/2:(ih-oh)*0.4
                 // IMPORTANT: Invert signs to match ImageMagick preview behavior
                 // ImageMagick moves the background, FFmpeg moves the crop window
                 var invertedCropX = -cropX;
@@ -654,7 +668,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 var scaleH = zoom > 0 ? (int)(mh * zoom) : mh;
 
                 // EN: Calculate logo size with scale (default is 80% of marquee height)
-                // FR: Calculer taille logo avec scale (défaut est 80% de hauteur marquee)
+                // FR: Calculer taille logo avec scale (dÃ©faut est 80% de hauteur marquee)
                 int logoH = (int)(mh * 0.8 * logoScale);
 
                 string filter;
@@ -791,7 +805,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     var startInfo = new ProcessStartInfo
                     {
                         FileName = _config.IMPath,
-                        Arguments = $"\"{path}\" -background none -resize {_config.DmdWidth}x{_config.DmdHeight} \"{tempPng}\"", 
+                        Arguments = $"-background none \"{path}\" -resize {_config.DmdWidth}x{_config.DmdHeight} \"{tempPng}\"", 
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardOutput = true,
@@ -838,66 +852,72 @@ namespace RetroBatMarqueeManager.Application.Services
             }
         }
 
-        private bool ConvertDmdImage(string source, string target)
+        private bool ConvertDmdImage(string source, string target, bool isHardcore = false)
         {
             try
             {
-                var w = _config.DmdWidth;
-                var h = _config.DmdHeight;
+                var w = _config.DmdWidth > 0 ? _config.DmdWidth : 128;
+                var h = _config.DmdHeight > 0 ? _config.DmdHeight : 32;
 
-                // Use ImageMagick CLI: Match Python's opaque background approach
-                var bgColor = _config.MarqueeBackgroundColor; // e.g. "Black" or "#000000"
-                if (string.IsNullOrEmpty(bgColor) || bgColor.Equals("None", StringComparison.OrdinalIgnoreCase)) bgColor = "Black";
-                
-                var args = new List<string>
+                using (var bitmap = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(bitmap))
                 {
-                    "-density", "96",          // Force 96 DPI
-                    "-background", bgColor,    // Use configured background (usually Black)
-                    source,
-                    "-resize", $"{w}x{h}",     // Force fit inside WxH while preserving aspect ratio
-                    "-gravity", "center", 
-                    "-extent", $"{w}x{h}",     // Pad with background color to fill WxH
-                    "-background", bgColor,    // Ensure extent uses background
-                    "-flatten",                // Flatten transparency onto background
-                    "-alpha", "off",           // Remove alpha channel entirely (force opaque)
-                    "-units", "PixelsPerInch",
-                    "-density", "96",
-                    target
-                };
+                    // EN: Set background color / FR: DÃ©finir la couleur de fond
+                    var bgColorStr = _config.MarqueeBackgroundColor;
+                    Color bgColor = Color.Black;
+                    try 
+                    { 
+                        if (!string.IsNullOrEmpty(bgColorStr) && !bgColorStr.Equals("None", StringComparison.OrdinalIgnoreCase))
+                            bgColor = ColorTranslator.FromHtml(bgColorStr); 
+                    } catch { }
 
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = _config.IMPath,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(_config.IMPath)
-                };
+                    g.Clear(bgColor);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
 
-                foreach (var arg in args) startInfo.ArgumentList.Add(arg);
+                    using (var srcImg = LoadBitmapWithSvgSupport(source))
+                    {
+                        if (srcImg != null)
+                        {
+                            // EN: Calculate best fit / FR: Calculer le meilleur ajustement
+                            float ratio = Math.Min((float)w / srcImg.Width, (float)h / srcImg.Height);
+                            int targetW = (int)(srcImg.Width * ratio);
+                            int targetH = (int)(srcImg.Height * ratio);
+                            int targetX = (w - targetW) / 2;
+                            int targetY = (h - targetH) / 2;
 
-                using var process = Process.Start(startInfo);
-                if (process == null) return false;
+                            // EN: Draw image / FR: Dessiner l'image
+                            g.DrawImage(srcImg, targetX, targetY, targetW, targetH);
 
-                process.WaitForExit(5000);
+                            if (isHardcore)
+                            {
+                                // EN: Draw Golden Border around the actual image area / FR: Dessiner cadre dorÃ© autour de l'image
+                                using (var penGold = new Pen(Color.Gold, 1)) // 1px for DMD is enough
+                                {
+                                    g.DrawRectangle(penGold, targetX, targetY, targetW - 1, targetH - 1);
+                                    
+                                    // EN: Internal highlight / FR: Ã‰clat interne
+                                    using (var penInner = new Pen(Color.FromArgb(150, Color.LightYellow), 1))
+                                    {
+                                        g.DrawRectangle(penInner, targetX + 1, targetY + 1, targetW - 3, targetH - 3);
+                                    }
+                                }
+                            }
+                        }
+                    } // End using srcImg
 
-                if (process.ExitCode != 0)
-                {
-                    _logger.LogError($"ImageMagick DMD conversion error: {process.StandardError.ReadToEnd()}");
-                    return false;
+                    bitmap.Save(target, ImageFormat.Png);
+                    return true;
                 }
-
-                return File.Exists(target);
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Error converting DMD image {source}: {ex.Message}");
+                _logger.LogError($"Error converting DMD image {source} (Hardcore={isHardcore}): {ex.Message}");
                 return false;
             }
         }
 
-        public string? GenerateMpvAchievementOverlay(string badgePath, string title, string description, int points, string subFolder = "overlays")
+        public string? GenerateMpvAchievementOverlay(string badgePath, string title, string description, int points, bool isHardcore = false, string subFolder = "overlays", bool forceRegenerate = false)
         {
             try
             {
@@ -906,15 +926,23 @@ namespace RetroBatMarqueeManager.Application.Services
                 if (w <= 0) w = 1920; 
                 if (h <= 0) h = 360;
 
+                // EN: Determine subfolder based on Hardcore status if using default "overlays"
+                // FR: DÃ©terminer le sous-dossier selon le statut Hardcore si "overlays" par dÃ©faut est utilisÃ©
+                if (subFolder == "overlays" && isHardcore)
+                {
+                    subFolder = "hc_overlays";
+                }
+
                 string cacheDir = Path.Combine(_config.CachePath, subFolder);
                 if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
 
                 // Unique filename based on title content to cache it
                 string cleanTitle = string.Join("_", title.Split(Path.GetInvalidFileNameChars()));
-                string targetPath = Path.Combine(cacheDir, $"ach_overlay_{cleanTitle}_{points}_{w}x{h}.png");
+                string timestamp = forceRegenerate ? $"_{DateTime.Now.Ticks}" : "";
+                string targetPath = Path.Combine(cacheDir, $"ach_overlay_{cleanTitle}_{points}_{w}x{h}{timestamp}.png");
 
                 // Reuse cache? (Maybe not if badge changes? Badge is usually stable per achievement)
-                if (File.Exists(targetPath)) return targetPath;
+                if (!forceRegenerate && File.Exists(targetPath)) return targetPath;
 
                 using (var bitmap = new Bitmap(w, h))
                 using (var g = Graphics.FromImage(bitmap))
@@ -923,77 +951,115 @@ namespace RetroBatMarqueeManager.Application.Services
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
                     g.Clear(Color.Transparent); // Transparent background
 
-                    // Design:
-                    // [ Badge (Left) ]  [ Title (Top) ]
-                    //                   [ Desc (Bottom) ]
-                    // + Cup icon or points somewhere?
+                    var overlay = GetOverlayItem("unlock", false);
+                    int boxX, boxY, boxWidth, boxHeight;
 
-                // Aspect Ratio Check
-                // EN: If standard 16:9 (ratio < 3), use "Banner" style (smaller relative size)
-                // FR: Si standard 16:9 (ratio < 3), utiliser style "Bannière" (taille relative plus petite)
-                double aspectRatio = (double)w / (double)h;
-                bool isUltrawide = aspectRatio > 3.0;
-
-                // Scaling Factors
-                // EN: Increased to 35% for 1080p per user feedback ("too small/low" at 25%)
-                // FR: Augmenté à 35% pour 1080p selon retour utilisateur ("trop petit/bas" à 25%)
-                float heightScale = isUltrawide ? 0.8f : 0.35f; 
-                float marginScale = isUltrawide ? 18.0f : 50.0f; 
-
-                int badgeSize = (int)(h * heightScale); 
-                int margin = Math.Max(10, (int)(h / marginScale));
-                
-                // Vertical Position: Always Center Vertically (Left Center)
-                // EN: User requested "Center screen on the left" for both modes
-                // FR: Utilisateur a demandé "Centre écran sur la gauche" pour les deux modes
-                int badgeY = (h - badgeSize) / 2;
-                int badgeX = margin;
-
-                // Load Badge
-                using (var badgeImg = LoadBitmapWithSvgSupport(badgePath))
-                {
-                    if (badgeImg != null)
+                    if (overlay != null)
                     {
-                        g.DrawImage(badgeImg, badgeX, badgeY, badgeSize, badgeSize);
+                        if (!overlay.IsEnabled) return string.Empty; // Skip hidden element
+                        boxX = overlay.X;
+                        boxY = overlay.Y;
+                        boxWidth = overlay.Width;
+                        boxHeight = overlay.Height;
                     }
+                    else
+                    {
+                        // EN: Layout Logic - Fallback strategy
+                        // FR: Logique de mise en page - StratÃ©gie de secours
+                        double aspectRatio = (double)w / (double)h;
+                        bool isUltrawide = aspectRatio > 3.0;
+
+                        float boxHeightFactor = isUltrawide ? 0.60f : 0.30f;
+                        boxHeight = (int)(h * boxHeightFactor);
+                        boxY = (h - boxHeight) / 2;
+
+                        int contentPaddingTemp = boxHeight / 10;
+                        int badgeSizeTemp = boxHeight - (contentPaddingTemp * 2);
+                        float textScaleFactorTemp = badgeSizeTemp / 150.0f;
+                        int titleSizeTemp = Math.Max(12, (int)(32 * textScaleFactorTemp));
+                        int descSizeTemp = Math.Max(10, (int)(22 * textScaleFactorTemp));
+                        int pointsSizeTemp = Math.Max(10, (int)(24 * textScaleFactorTemp));
+
+                        using (var titleFontTemp = new Font("Segoe UI", titleSizeTemp, FontStyle.Bold, GraphicsUnit.Pixel))
+                        using (var descFontTemp = new Font("Segoe UI", descSizeTemp, FontStyle.Regular, GraphicsUnit.Pixel))
+                        using (var pointsFontTemp = new Font("Segoe UI", pointsSizeTemp, FontStyle.Bold, GraphicsUnit.Pixel))
+                        {
+                            var titleMeas = g.MeasureString(title, titleFontTemp);
+                            var descMeas = g.MeasureString(description, descFontTemp);
+                            var pointsMeas = g.MeasureString($"{points} pts", pointsFontTemp);
+                            float maxTextWidth = Math.Max(titleMeas.Width, Math.Max(descMeas.Width, pointsMeas.Width));
+
+                            int minBoxWidth = (int)(w * 0.4f);
+                            int maxBoxWidth = (int)(w * 0.9f);
+                            int textAreaWidth = (int)maxTextWidth + (contentPaddingTemp * 2);
+                            int requiredWidth = badgeSizeTemp + textAreaWidth + (contentPaddingTemp * 3);
+                            boxWidth = Math.Clamp(requiredWidth, minBoxWidth, maxBoxWidth);
+                            boxX = (w - boxWidth) / 2;
+                        }
+                    }
+
+                    int contentPadding = boxHeight / 10;
+                    int badgeSize = boxHeight - (contentPadding * 2);
+
+                    // EN: Proportional text sizing based on box height (or Config override)
+                    // FR: Taille de texte proportionnelle (ou surcharge config)
+                    int titleSize, descSize, pointsSize;
+                    
+                    if (overlay != null && overlay.FontSize > 0)
+                    {
+                         titleSize = (int)overlay.FontSize;
+                         descSize = Math.Max(10, (int)(titleSize * 0.7));
+                         pointsSize = Math.Max(10, (int)(titleSize * 0.75));
+                    }
+                    else
+                    {
+                        titleSize = Math.Max(12, (int)(boxHeight * 0.20)); 
+                        descSize = Math.Max(10, (int)(boxHeight * 0.14));
+                        pointsSize = Math.Max(10, (int)(boxHeight * 0.15));
+                    }
+
+                    string fontFamily = _config.RAFontFamily;
+                    if (string.IsNullOrEmpty(fontFamily)) fontFamily = "Segoe UI";
+
+                    using (var titleFont = new Font(fontFamily, titleSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (var descFont = new Font(fontFamily, descSize, FontStyle.Regular, GraphicsUnit.Pixel))
+                    using (var pointsFont = new Font(fontFamily, pointsSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (var brushWhite = new SolidBrush(Color.White))
+                    using (var brushGold = new SolidBrush(GetColorFromHex(overlay?.TextColor ?? "", Color.Gold)))
+                    {
+                        Color bgColor = Color.FromArgb(220, 30, 30, 30); // Default semi-transparent grey
+                        using (var brushBox = new SolidBrush(bgColor))
+                        using (var penBorder = new Pen(isHardcore ? Color.Gold : Color.Silver, 2))
+                        {
+                            if (bgColor.A > 0)
+                            {
+                                g.FillRectangle(brushBox, boxX, boxY, boxWidth, boxHeight);
+                            }
+                            g.DrawRectangle(penBorder, boxX, boxY, boxWidth, boxHeight);
+                        }
+
+                        // Content positioning
+                        int badgeX = boxX + contentPadding;
+                        int badgeY = boxY + contentPadding;
+
+                        DrawBadgeWithFrame(g, badgePath, badgeX, badgeY, badgeSize, isHardcore, false);
+
+                        int textX = badgeX + badgeSize + contentPadding;
+                        int textWidth = boxWidth - (badgeSize + contentPadding * 3);
+
+                        // Title
+                        g.DrawString(title, titleFont, brushGold, new RectangleF(textX, badgeY + (badgeSize * 0.05f), textWidth, badgeSize * 0.4f));
+
+                        // Description
+                        g.DrawString(description, descFont, brushWhite, new RectangleF(textX, badgeY + (badgeSize * 0.40f), textWidth, badgeSize * 0.4f));
+
+                        // Points
+                        string pointsText = $"{points} pts";
+                        g.DrawString(pointsText, pointsFont, brushGold, new RectangleF(textX, badgeY + (badgeSize * 0.75f), textWidth, badgeSize * 0.3f));
+                    }
+                    bitmap.Save(targetPath, ImageFormat.Png);
                 }
-
-                // Text Area
-                int textX = badgeX + badgeSize + margin;
-                int textWidth = w - textX - margin;
-                
-                // Fonts - Scale relative to Badge Size now (consistent across ARs)
-                // Badge is the anchor. 
-                // Title is ~20% of badge? No, let's stick to height logic but adjusted by banner factor
-                
-                float fontScaleFactor = isUltrawide ? 1.0f : 0.5f; // Increased relative font size for banner mode
-                
-                int titleSize = Math.Max(12, (int)((h / 7.5f) * fontScaleFactor));
-                int descSize = Math.Max(10, (int)((h / 11.25f) * fontScaleFactor));
-                int pointsSize = Math.Max(10, (int)((h / 10.0f) * fontScaleFactor));
-
-                using (var titleFont = new Font("Segoe UI", titleSize, FontStyle.Bold, GraphicsUnit.Pixel))
-                using (var descFont = new Font("Segoe UI", descSize, FontStyle.Regular, GraphicsUnit.Pixel))
-                using (var pointsFont = new Font("Segoe UI", pointsSize, FontStyle.Bold, GraphicsUnit.Pixel))
-                using (var brushWhite = new SolidBrush(Color.White))
-                using (var brushGold = new SolidBrush(Color.Gold))
-                using (var brushGray = new SolidBrush(Color.LightGray))
-                {
-                    // Vertical text offsets relative to badgeY
-                    // Title (Nudged down to 10% from top of badge)
-                    g.DrawString(title, titleFont, brushGold, new RectangleF(textX, badgeY + (badgeSize * 0.10f), textWidth, badgeSize * 0.4f));
-
-                    // Description (Nudged to 40%)
-                    g.DrawString(description, descFont, brushWhite, new RectangleF(textX, badgeY + (badgeSize * 0.40f), textWidth, badgeSize * 0.4f));
-
-                    // Points (Nudged to 75%)
-                    string pointsText = $"{points} pts";
-                    g.DrawString(pointsText, pointsFont, brushGold, new RectangleF(textX, badgeY + (badgeSize * 0.75f), textWidth, badgeSize * 0.3f));
-                }
-                
-                bitmap.Save(targetPath, ImageFormat.Png);
-            }
-            return targetPath;
+                return targetPath;
             }
             catch (Exception ex)
             {
@@ -1002,59 +1068,606 @@ namespace RetroBatMarqueeManager.Application.Services
             }
         }
 
-        public List<byte[]> GenerateDmdScrollingTextFrames(string text, int width, int height, bool useGrayscale)
+        /// <summary>
+        /// EN: Generate overlay for Challenge (Timer or Progress)
+        /// FR: GÃ©nÃ©rer overlay pour DÃ©fi (Timer ou ProgrÃ¨s)
+        /// </summary>
+        public string GenerateChallengeOverlay(ChallengeState state, int width, int height, bool isHardcore, bool forceRegenerate = false)
         {
+            var fileName = $"challenge_{state.AchievementId}_{DateTime.Now.Ticks}.png";
+            string subFolder = isHardcore ? "hc_overlays" : "overlays";
+            var tempPath = Path.Combine(_config.CachePath, subFolder, fileName);
+            if (!Directory.Exists(Path.GetDirectoryName(tempPath)))
+                Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
+            
+            // EN: If forceRegenerate is true, we rely on the unique Ticks to generate a new file.
+            // But we can also check if by some chance it exists (unlikely with Ticks)
+            if (forceRegenerate && File.Exists(tempPath)) File.Delete(tempPath);
+
+            try
+            {
+                using (var bmp = new Bitmap(width, height))
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+                    // Design: Semi-transparent box in top-right or top-center?
+                    // MPV usually overlays on top-left by default unless configured.
+                    // We'll draw a nice box.
+                    
+                    int boxWidth = 350;
+                    int boxHeight = 120; // Increased to fit description
+                    int margin = 20;
+                    
+                    // EN: Use "challenge" overlay item for all types (badge presence handled internally)
+                    // FR: Utiliser l'item d'overlay "challenge" pour tous les types (présence de badge gérée en interne)
+                    var overlay = GetOverlayItem("challenge", false);
+                    int x, y;
+                    int finalBoxWidth = boxWidth;
+                    int finalBoxHeight = boxHeight;
+
+                    if (overlay != null)
+                    {
+                        if (!overlay.IsEnabled) return string.Empty;
+                        x = overlay.X;
+                        y = overlay.Y;
+                        finalBoxWidth = overlay.Width;
+                        finalBoxHeight = overlay.Height;
+                    }
+                    else
+                    {
+                        // Position: Center-Left as requested by user
+                        x = margin;
+                        y = (height - boxHeight) / 2;
+                    }
+
+                    // Background & Border
+                    // EN: Use consistent gray background instead of following TextColor (which is often gold)
+                    // FR: Utiliser un fond gris cohérent au lieu de suivre TextColor (qui est souvent doré)
+                    Color bgColor = Color.FromArgb(180, 40, 40, 40); 
+                    
+                    // EN: Measure text for dynamic frame expansion
+                    // FR: Mesurer le texte pour l'expansion dynamique du cadre
+                    string fontFamily = _config.RAFontFamily;
+                    if (string.IsNullOrEmpty(fontFamily)) fontFamily = "Arial";
+
+                    int fontSizeTitle, fontSizeDesc, fontSizeStatus;
+
+                    if (overlay != null && overlay.FontSize > 0)
+                    {
+                        fontSizeTitle = (int)overlay.FontSize;
+                        fontSizeDesc = Math.Max(7, (int)(fontSizeTitle * 0.7));
+                        fontSizeStatus = Math.Max(9, (int)(fontSizeTitle * 0.8));
+                    }
+                    else
+                    {
+                        fontSizeTitle = Math.Max(8, (int)(finalBoxHeight * 0.12));
+                        fontSizeDesc = Math.Max(7, (int)(finalBoxHeight * 0.08));
+                        fontSizeStatus = Math.Max(9, (int)(finalBoxHeight * 0.14));
+                    }
+
+                    string title = state.Title.Length > 25 ? state.Title.Substring(0, 23) + "..." : state.Title;
+                    string status = state.Progress;
+                    if (state.Type == ChallengeType.Timer || state.Type == ChallengeType.Leaderboard)
+                    {
+                        var elapsed = DateTime.Now - state.StartTime;
+                        status = $"TIME: {(int)elapsed.TotalMinutes:D2}:{elapsed.Seconds:D2}";
+                    }
+                    else if (string.IsNullOrEmpty(status))
+                    {
+                        status = "ACTIVE";
+                    }
+
+                    using (var fTitle = new Font(fontFamily, fontSizeTitle, FontStyle.Bold))
+                    using (var fStatus = new Font(fontFamily, fontSizeStatus, FontStyle.Bold))
+                    {
+                        var titleSize = g.MeasureString(title, fTitle);
+                        var statusSize = g.MeasureString(status, fStatus);
+                        
+                        // EN: Auto-expand frame if text is too large
+                        // FR: Agrandir automatiquement le cadre si le texte est trop grand
+                        int badgeSpace = finalBoxHeight; // rough estimate
+                        int neededWidth = (int)Math.Max(titleSize.Width, statusSize.Width) + badgeSpace + 30;
+                        if (neededWidth > finalBoxWidth)
+                        {
+                            finalBoxWidth = neededWidth;
+                        }
+                    }
+
+                    if (bgColor.A > 0)
+                    {
+                        using (var brush = new SolidBrush(bgColor))
+                        {
+                            g.FillRectangle(brush, x, y, finalBoxWidth, finalBoxHeight);
+                        }
+                    }
+
+                    Color borderColor = isHardcore ? Color.Gold : Color.Silver;
+                    using (var pen = new Pen(borderColor, 2))
+                    {
+                        g.DrawRectangle(pen, x, y, finalBoxWidth, finalBoxHeight);
+                    }
+
+                    // Badge (Proportional to box height)
+                    int badgeMargin = (int)(finalBoxHeight * 0.08); 
+                    int badgeSize = finalBoxHeight - (badgeMargin * 2);
+                    
+                    bool hasBadge = !string.IsNullOrEmpty(state.BadgePath) && File.Exists(state.BadgePath);
+
+                    if (hasBadge)
+                    {
+                        using (var badgeImg = Image.FromFile(state.BadgePath!))
+                        {
+                            g.DrawImage(badgeImg, x + badgeMargin, y + badgeMargin, badgeSize, badgeSize);
+                        }
+                    }
+                    else if (state.Type == ChallengeType.Leaderboard)
+                    {
+                        // EN: Fallback for Leaderboard: Draw Trophy Emoji
+                        // FR: Repli pour Leaderboard : Dessiner Emoji Trophée
+                        using (var fontBadge = new Font("Segoe UI Emoji", badgeSize * 0.8f, FontStyle.Regular))
+                        using (var brushBadge = new SolidBrush(Color.Gold))
+                        {
+                            // Center emoji
+                            var emoji = "🏆";
+                            var size = g.MeasureString(emoji, fontBadge);
+                            float emX = x + badgeMargin + (badgeSize - size.Width) / 2;
+                            float emY = y + badgeMargin + (badgeSize - size.Height) / 2;
+                            g.DrawString(emoji, fontBadge, brushBadge, emX, emY);
+                        }
+                        hasBadge = true; // Treat as having badge for text positioning
+                    }
+
+                    int textX = x + badgeMargin + badgeSize + 10;
+                    if (!hasBadge) textX = x + margin; // Shift text left if no badge/icon
+                    int textWidth = finalBoxWidth - (badgeSize + badgeMargin + 20);
+
+                    using (var fontTitle = new Font(fontFamily, fontSizeTitle, FontStyle.Bold))
+                    using (var fontDesc = new Font(fontFamily, fontSizeDesc, FontStyle.Italic))
+                    using (var fontStatus = new Font(fontFamily, fontSizeStatus, FontStyle.Bold))
+                    using (var brushText = new SolidBrush(Color.White))
+                    using (var brushStatus = new SolidBrush(GetColorFromHex(overlay?.TextColor ?? "", Color.Gold)))
+                    {
+                        // Title
+                        g.DrawString(title, fontTitle, brushStatus, textX, y + (int)(finalBoxHeight * 0.1));
+                        
+                        // Description (Multi-line)
+                        if (!string.IsNullOrEmpty(state.Description))
+                        {
+                            var descRect = new RectangleF(textX, y + (int)(finalBoxHeight * 0.3), textWidth, (int)(finalBoxHeight * 0.45));
+                            g.DrawString(state.Description, fontDesc, brushText, descRect);
+                        }
+
+                        // Status / Timer
+                        g.DrawString(status, fontStatus, brushText, textX, y + (int)(finalBoxHeight * 0.75));
+                    }
+                    
+                    bmp.Save(tempPath, ImageFormat.Png);
+                }
+                return tempPath;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] GenerateChallengeOverlay Error: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// EN: Generate DMD frames for Challenge (Static Badge + Text)
+        /// FR: GÃ©nÃ©rer frames DMD pour DÃ©fi (Badge statique + Texte)
+        /// </summary>
+        public List<byte[]> GenerateDmdChallengeFrames(ChallengeState state, int width, int height, bool useGrayscale, string? ribbonPath = null)
+        {
+             // Debug Log for Leaderboard Issue
+             _logger.LogInformation($"[ImageConversion] GenerateDmdChallengeFrames: ID={state.AchievementId}, Type={state.Type}, Progress='{state.Progress}', Ribbon={!string.IsNullOrEmpty(ribbonPath)}");
+
+             var frames = new List<byte[]>();
+             try
+             {
+                 using (var bmp = new Bitmap(width, height))
+                 using (var g = Graphics.FromImage(bmp))
+                 {
+                     g.Clear(Color.Black);
+                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+                     if (useGrayscale) g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+                      // 1. Draw Ribbon FIRST (if present) - Full size 128x32 to avoid distortion
+                      if (!string.IsNullOrEmpty(ribbonPath) && File.Exists(ribbonPath))
+                      {
+                          try
+                          {
+                              using (var ribbonImg = Image.FromFile(ribbonPath))
+                              {
+                                  g.DrawImage(ribbonImg, 0, 0, width, height);
+                              }
+                          }
+                          catch { }
+                      }
+
+                      // Design: Similar to GenerateDmdChallengeImage
+                                             bool checkBadge = !string.IsNullOrEmpty(state.BadgePath) && File.Exists(state.BadgePath); string overlayType = checkBadge ? "challenge" : "challenge";
+                      var overlay = GetOverlayItem(overlayType, true);
+
+                      int boxX = 0;
+                      int boxY = 0;
+                      int boxW = width;
+                      int boxH = !string.IsNullOrEmpty(ribbonPath) ? height / 2 : height;
+
+                      if (overlay != null && overlay.IsEnabled)
+                      {
+                          boxX = overlay.X;
+                          boxY = overlay.Y;
+                          boxW = overlay.Width;
+                          boxH = overlay.Height;
+                      }
+
+                      // Badge (Left)
+                      int badgeSize = boxH; 
+                      bool hasBadge = !string.IsNullOrEmpty(state.BadgePath) && File.Exists(state.BadgePath);
+
+                      Color lbColor = GetLeaderboardColor(state.AchievementId);
+
+                      if (hasBadge)
+                      {
+                          using (var badgeImg = Image.FromFile(state.BadgePath!))
+                          {
+                              g.DrawImage(badgeImg, boxX, boxY, badgeSize, badgeSize);
+                          }
+                      }
+                      else if (state.Type == ChallengeType.Leaderboard)
+                      {
+                          // Fallback Trophy for DMD
+                          // EN: Increased size to 0.6f for better visibility
+                          // FR: Taille augmentée à 0.6f pour une meilleure visibilité
+                          float emSize = badgeSize * 0.6f;
+                          using (var fontBadge = new Font("Segoe UI Emoji", emSize, FontStyle.Regular))
+                          using (var brushBadge = new SolidBrush(lbColor))
+                          {
+                              var emoji = "🏆";
+                              var size = g.MeasureString(emoji, fontBadge);
+                              float emX = boxX + (badgeSize - size.Width) / 2;
+                              // EN: Manual vertical offset adjustment (+1) to align visually with text
+                              // FR: Ajustement manuel de l'offset vertical (+1) pour s'aligner visuellement avec le texte
+                              float emY = boxY + (badgeSize - size.Height) / 2 + 1; 
+                              g.DrawString(emoji, fontBadge, brushBadge, emX, emY);
+                          }
+                          hasBadge = true; 
+                      }
+
+                       // Text (Right)
+                       // EN: Periodic alternation (3s Title / 3s Timer)
+                       // FR: Alternance périodique (3s Titre / 3s Timer)
+                       var elapsedSinceStart = DateTime.Now - state.StartTime;
+                       bool showTitle = state.Type == ChallengeType.Leaderboard && (DateTime.Now.Second % 6 < 3);
+
+                       string text = "";
+                       string? titleText = null;
+
+                       if (state.Type == ChallengeType.Timer || state.Type == ChallengeType.Leaderboard)
+                       {
+                           var elapsed = DateTime.Now - state.StartTime;
+                           text = $"{(int)elapsed.TotalMinutes:D2}:{elapsed.Seconds:D2}";
+                           if (showTitle) titleText = state.Title ?? "Leaderboard";
+                       }
+                       else
+                       {
+                           text = string.IsNullOrEmpty(state.Progress) ? "ACTIVE" : state.Progress;
+                       }
+
+                       float tx = boxX + badgeSize + 1;
+                       if (!hasBadge) tx = boxX + 2;
+
+                       if (showTitle && !string.IsNullOrEmpty(titleText))
+                      {
+                          if (string.IsNullOrEmpty(ribbonPath))
+                          {
+                              using (var fontTitle = new Font("Arial", 6, FontStyle.Bold))
+                              using (var fontTimer = new Font("Arial", 9, FontStyle.Bold))
+                              using (var brushTitle = new SolidBrush(lbColor))
+                              using (var brushTimer = new SolidBrush(lbColor))
+                              {
+                                  if (titleText.Length > 20) titleText = titleText.Substring(0, 17) + "...";
+                                  g.DrawString(titleText, fontTitle, brushTitle, tx, boxY + 2);
+                                  g.DrawString(text, fontTimer, brushTimer, tx, boxY + 16);
+                              }
+                          }
+                          else
+                          {
+                              using (var font = new Font("Arial", 8, FontStyle.Bold))
+                              using (var brush = new SolidBrush(lbColor))
+                              {
+                                  if (titleText.Length > 20) titleText = titleText.Substring(0, 17) + "...";
+                                  var size = g.MeasureString(titleText, font);
+                                  float ty = boxY + (boxH - size.Height) / 2;
+                                  g.DrawString(titleText, font, brush, tx, ty);
+                              }
+                          }
+                      }
+                      else
+                      {
+                          int fontSize = (overlay != null && overlay.FontSize > 0) ? (int)overlay.FontSize : (!string.IsNullOrEmpty(ribbonPath) ? 9 : 10);
+                          using (var font = new Font("Arial", fontSize, FontStyle.Bold))
+                          using (var brush = new SolidBrush(state.Type == ChallengeType.Leaderboard ? lbColor : Color.White))
+                          {
+                              var size = g.MeasureString(text, font);
+                              if (!hasBadge) tx = boxX + (boxW - size.Width) / 2;
+                              float ty = boxY + (boxH - size.Height) / 2;
+                              g.DrawString(text, font, brush, tx, ty);
+                          }
+                      }
+                     
+                     frames.Add(GetRawDmdBytes(bmp, width, height, useGrayscale));
+                 }
+                 // Return single frame (static) or multiples if we animated? Static for now is efficient.
+                 // Maybe 2 frames to ensure refresh?
+             }
+             catch (Exception ex)
+             {
+                 _logger.LogError($"[ImageConversion] GenerateDmdChallengeFrames Error: {ex.Message}");
+             }
+             return frames;
+        }
+
+        /// <summary>
+        /// EN: Generate DMD image for Challenge (Static Badge + Text) returning path
+        /// FR: GÃ©nÃ©rer image DMD pour DÃ©fi (Badge statique + Texte) retournant chemin
+        /// </summary>
+        public string GenerateDmdChallengeImage(ChallengeState state, int width, int height, bool useGrayscale, bool isHardcore = false, string? ribbonPath = null)
+        {
+             var fileName = $"dmd_challenge_{state.AchievementId}_{DateTime.Now.Ticks}.png";
+             var folder = isHardcore ? "hc_overlays" : "overlays";
+             var tempPath = Path.Combine(_config.CachePath, folder, fileName);
+             if (!Directory.Exists(Path.GetDirectoryName(tempPath)))
+                 Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
+
+             try
+             {
+                 using (var bmp = new Bitmap(width, height))
+                 using (var g = Graphics.FromImage(bmp))
+                 {
+                     g.Clear(Color.Black);
+                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+                     if (useGrayscale) g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+                      // 1. Draw Ribbon FIRST (if present) - Full size 128x32 to avoid distortion
+                      // FR: Dessiner le Ruban en PREMIER (si présent) - Taille réelle 128x32 pour éviter la déformation
+                      if (!string.IsNullOrEmpty(ribbonPath) && File.Exists(ribbonPath))
+                      {
+                          try
+                          {
+                              using (var ribbonImg = Image.FromFile(ribbonPath))
+                              {
+                                  // EN: The ribbon image generated for DMD is already 128x32 with 16px height content at the bottom.
+                                  // EN: Drawing it full-size ensures no distortion.
+                                  g.DrawImage(ribbonImg, 0, 0, width, height);
+                              }
+                          }
+                          catch { /* Ignore ribbon load errors */ }
+                      }
+
+                       // Design: Static frame with badge and text
+                                             bool checkBadge = !string.IsNullOrEmpty(state.BadgePath) && File.Exists(state.BadgePath); string overlayType = checkBadge ? "challenge" : "challenge";
+                      var overlay = GetOverlayItem(overlayType, true);
+                      int boxX, boxY, boxW, boxH;
+
+                      if (overlay != null && overlay.IsEnabled)
+                      {
+                          boxX = overlay.X;
+                          boxY = overlay.Y;
+                          boxW = overlay.Width;
+                          boxH = overlay.Height;
+                      }
+                      else
+                      {
+                          boxX = 0;
+                          boxY = 0;
+                          boxW = width;
+                          boxH = !string.IsNullOrEmpty(ribbonPath) ? height / 2 : height; // EN: Half height if ribbon present / FR: Demi-hauteur si ruban présent
+                      }
+
+                      // Badge (Left)
+                      int badgeSize = boxH; 
+                      bool hasBadge = !string.IsNullOrEmpty(state.BadgePath) && File.Exists(state.BadgePath);
+
+                      Color lbColor = GetLeaderboardColor(state.AchievementId);
+
+                      if (hasBadge)
+                      {
+                          using (var badgeImg = Image.FromFile(state.BadgePath!))
+                          {
+                              g.DrawImage(badgeImg, boxX, boxY, badgeSize, badgeSize);
+                          }
+                      }
+                      else if (state.Type == ChallengeType.Leaderboard)
+                      {
+                          // Fallback Trophy for DMD
+                          // EN: Increased size to 0.6f as requested for better visibility
+                          // FR: Taille augmentée à 0.6f pour une meilleure visibilité
+                          float emSize = badgeSize * 0.6f;
+                          using (var fontBadge = new Font("Segoe UI Emoji", emSize, FontStyle.Regular))
+                          using (var brushBadge = new SolidBrush(lbColor))
+                          {
+                              var emoji = "🏆";
+                              var size = g.MeasureString(emoji, fontBadge);
+                              float emX = boxX + (badgeSize - size.Width) / 2;
+                              float emY = boxY + (badgeSize - size.Height) / 2 + 1; 
+                              g.DrawString(emoji, fontBadge, brushBadge, emX, emY);
+                          }
+                          hasBadge = true;
+                      }
+
+                      // Text (Right)
+                      // EN: Periodic alternation (3s Title / 3s Timer) to ensure all names are seen in rotation
+                      // FR: Alternance périodique (3s Titre / 3s Timer) pour assurer que tous les noms sont vus durant la rotation
+                      var elapsedSinceStart = DateTime.Now - state.StartTime;
+                      bool showTitle = state.Type == ChallengeType.Leaderboard && (DateTime.Now.Second % 6 < 3);
+
+                      string text = "";
+                      string? titleText = null;
+
+                      if (state.Type == ChallengeType.Timer || state.Type == ChallengeType.Leaderboard)
+                      {
+                          var elapsed = DateTime.Now - state.StartTime;
+                          text = $"{(int)elapsed.TotalMinutes:D2}:{elapsed.Seconds:D2}";
+                          if (showTitle) titleText = state.Title ?? "Leaderboard";
+                      }
+                      else
+                      {
+                          text = string.IsNullOrEmpty(state.Progress) ? "ACTIVE" : state.Progress;
+                      }
+
+                      // Dynamic Border Color based on Hardcore
+                      Color borderColor = isHardcore ? Color.Gold : Color.Silver;
+                      
+                      float tx = boxX + badgeSize + 1; // EN: Moved closer to badge
+                      if (!hasBadge) tx = boxX + 2;
+
+                       if (showTitle && !string.IsNullOrEmpty(titleText))
+                      {
+                          // EN: 2-line layout (Only if no ribbon, otherwise it overflows)
+                          // FR: Layout sur 2 lignes (uniquement si pas de ruban, sinon ça déborde)
+                          if (string.IsNullOrEmpty(ribbonPath))
+                          {
+                              using (var fontTitle = new Font("Arial", 6, FontStyle.Bold))
+                              using (var fontTimer = new Font("Arial", 9, FontStyle.Bold))
+                              using (var brushTitle = new SolidBrush(lbColor))
+                              using (var brushTimer = new SolidBrush(lbColor))
+                              {
+                                  if (titleText.Length > 20) titleText = titleText.Substring(0, 17) + "...";
+                                  g.DrawString(titleText, fontTitle, brushTitle, tx, boxY + 2);
+                                  g.DrawString(text, fontTimer, brushTimer, tx, boxY + 16);
+                              }
+                          }
+                          else
+                          {
+                              // EN: Ribbon present: Show Title ONLY during initial phase in top 16px
+                              // FR: Ruban présent : Afficher le TITRE UNIQUEMENT pendant la phase initiale dans les 16px du haut
+                              using (var font = new Font("Arial", 8, FontStyle.Bold))
+                              using (var brush = new SolidBrush(lbColor))
+                              {
+                                  if (titleText.Length > 20) titleText = titleText.Substring(0, 17) + "...";
+                                  var size = g.MeasureString(titleText, font);
+                                  float ty = boxY + (boxH - size.Height) / 2;
+                                  g.DrawString(titleText, font, brush, tx, ty);
+                              }
+                          }
+                      }
+                      else
+                      {
+                          // EN: Standard centered layout
+                          // FR: Layout centré standard
+                          // EN: Use smaller font if ribbon is present to ensure fit in 16px
+                          int fontSize = (overlay != null && overlay.FontSize > 0) ? (int)overlay.FontSize : (!string.IsNullOrEmpty(ribbonPath) ? 9 : 10);
+                          using (var font = new Font("Arial", fontSize, FontStyle.Bold))
+                          using (var brush = new SolidBrush(state.Type == ChallengeType.Leaderboard ? lbColor : borderColor))
+                          {
+                              var size = g.MeasureString(text, font);
+                              if (!hasBadge) tx = boxX + (boxW - size.Width) / 2;
+                              
+                              float ty = boxY + (boxH - size.Height) / 2;
+                              g.DrawString(text, font, brush, tx, ty);
+                          }
+                      }
+                      
+                      bmp.Save(tempPath, ImageFormat.Png);
+                 }
+                 return tempPath;
+             }
+             catch (Exception ex)
+             {
+                 _logger.LogError($"[ImageConversion] GenerateDmdChallengeImage Error: {ex.Message}");
+                 return string.Empty;
+             }
+        }
+
+        private Color GetLeaderboardColor(int id)
+        {
+            // EN: Generate various shades of yellow/orange based on ID
+            // FR: Générer différentes nuances de jaune/orange basées sur l'ID
+            var colors = new[] 
+            { 
+                Color.Gold, 
+                Color.Orange, 
+                Color.DarkOrange, 
+                Color.Goldenrod, 
+                Color.Yellow, 
+                Color.OrangeRed,
+                Color.Khaki
+            };
+            int index = Math.Abs(id.GetHashCode() % colors.Length);
+            return colors[index];
+        }
+
+        public List<byte[]> GenerateDmdScrollingTextFrames(string text, int width, int height, bool useGrayscale, int yOffset = 0, int? targetHeight = null, string? textColor = null, float? fontSizeParam = null)
+        {
+            if (string.IsNullOrEmpty(text)) return new List<byte[]>();
+
+            // EN: Generate cache key based on parameters
+            // FR: Générer une clé de cache basée sur les paramètres
+            string cacheKey = $"{text}_{width}_{height}_{useGrayscale}_{yOffset}_{targetHeight}_{textColor}_{fontSizeParam}";
+            lock (_dmdFramesCache)
+            {
+                if (_dmdFramesCache.TryGetValue(cacheKey, out var cachedFrames))
+                {
+                    _logger.LogDebug($"[ImageConversion] Returning cached DMD scrolling frames for: {text}");
+                    return cachedFrames;
+                }
+            }
+
             var frames = new List<byte[]>();
             try
             {
-                // Create a bitmap that holds the entire text
-                // Estimate width: Chars * WidthPerChar (approx 8px?)
-                // Use Graphics.MeasureString to be precise
-                
+                int drawHeight = targetHeight ?? height;
                 using (var measureBmp = new Bitmap(1, 1))
-                using (var g = Graphics.FromImage(measureBmp))
-                using (var font = new Font("Arial", 10, FontStyle.Bold)) // Adjust font size for 32px height
+                using (var gMeasure = Graphics.FromImage(measureBmp))
                 {
-                    var textSize = g.MeasureString(text, font);
-                    int textTotalWidth = (int)textSize.Width + 20; // Padding
-                    int bmpWidth = Math.Max(width, textTotalWidth + width); // Extra width for scrolling in/out
+                    gMeasure.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+                    
+                    float fontSize = fontSizeParam > 0 ? fontSizeParam.Value : (drawHeight <= 16 ? 10 : 12);
+                    Font font;
+                    try { font = new Font("Segoe UI Emoji", fontSize, FontStyle.Bold); }
+                    catch { font = new Font("Arial", fontSize - 2, FontStyle.Bold); }
 
-                    // Create the full wide bitmap
-                    using (var fullTextBmp = new Bitmap(bmpWidth, height))
-                    using (var gText = Graphics.FromImage(fullTextBmp))
+                    using (font)
                     {
-                        gText.Clear(Color.Black);
-                        gText.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit; // Pixel look
-                        
-                        // Draw Text starting at 'width' (enters from right)
-                        using (var brush = new SolidBrush(Color.White))
+                        var textSize = gMeasure.MeasureString(text, font);
+                        int textTotalWidth = (int)textSize.Width + 20; 
+                        int bmpWidth = Math.Max(width, textTotalWidth + width);
+
+                        using (var fullTextBmp = new Bitmap(bmpWidth, drawHeight))
+                        using (var gText = Graphics.FromImage(fullTextBmp))
                         {
-                            // Center vertically
-                            float y = (height - textSize.Height) / 2;
-                            gText.DrawString(text, font, brush, width, y);
+                            gText.Clear(Color.Transparent); // Allow persistent layer to show through
+                            gText.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit; 
+                            gText.SmoothingMode = SmoothingMode.AntiAlias;
+                            
+                            Color drawColor = Color.Gold;
+                            if (!string.IsNullOrEmpty(textColor))
+                            {
+                                try { drawColor = ColorTranslator.FromHtml(textColor); } catch { }
+                            }
+
+                            using (var brush = new SolidBrush(drawColor))
+                            {
+                                float y = (drawHeight - textSize.Height) / 2;
+                                gText.DrawString(text, font, brush, width, y + 1);
+                            }
+
+                            int maxScroll = textTotalWidth + width; 
+                            for (int x = 0; x < maxScroll; x += 2) // Step 2 for faster scroll 
+                            {
+                                using (var frameBmp = new Bitmap(width, height))
+                                using (var gFrame = Graphics.FromImage(frameBmp))
+                                {
+                                    gFrame.Clear(Color.Transparent);
+                                    gFrame.DrawImage(fullTextBmp, new Rectangle(0, yOffset, width, drawHeight), new Rectangle(x, 0, width, drawHeight), GraphicsUnit.Pixel);
+                                    frames.Add(GetRawDmdBytes(frameBmp, width, height, useGrayscale));
+                                }
+                            }
                         }
-
-                        // Now slice it into frames
-                        // Scroll speed: 2 pixels per frame? 
-                        // Frame rate: assume 30ms per frame
-                        
-                        int maxScroll = bmpWidth - width; 
-                        // Actually we want to scroll untill text disappears or stops? 
-                        // "Scrolling right to left" -> Starts with empty (or text at right edge), text moves left, exits left.
-                        // Width of movement = TextWidth + ScreenWidth.
-
-                         for (int x = 0; x < textTotalWidth + width; x += 2) // Step 2 pixels
-                         {
-                             using (var frameBmp = new Bitmap(width, height))
-                             using (var gFrame = Graphics.FromImage(frameBmp))
-                             {
-                                 // Draw crop from source
-                                 gFrame.DrawImage(fullTextBmp, new Rectangle(0, 0, width, height), new Rectangle(x, 0, width, height), GraphicsUnit.Pixel);
-                                 
-                                 // Convert to DMD bytes
-                                 frames.Add(GetRawDmdBytes(frameBmp, width, height, useGrayscale));
-                             }
-                         }
                     }
                 }
             }
@@ -1062,15 +1675,111 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 _logger.LogError($"[ImageConversion] GenerateDmdScrollingTextFrames Error: {ex.Message}");
             }
+            lock (_dmdFramesCache)
+            {
+                // EN: Limit cache size to prevent memory bloat (keep last 20 unique scrolls)
+                if (_dmdFramesCache.Count > 20) _dmdFramesCache.Clear();
+                _dmdFramesCache[cacheKey] = frames;
+            }
             return frames;
         }
 
+
+        public byte[] GenerateDmdStaticTextFrame(string text, int width, int height, bool useGrayscale, int yOffset = 0, int? targetHeight = null)
+        {
+            try
+            {
+                int drawHeight = targetHeight ?? height;
+                using (var bitmap = new Bitmap(width, height)) // The final bitmap is full height
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.Black);
+                    g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+                    
+                    // EN: Use a smaller font if we are in split mode (half height)
+                    // FR: Utiliser une police plus petite si on est en mode divisÃ© (demi hauteur)
+                    float fontSize = drawHeight <= 16 ? 10 : 12;
+                    Font font;
+                    try { font = new Font("Segoe UI Emoji", fontSize, FontStyle.Bold); }
+                    catch { font = new Font("Arial", fontSize - 2, FontStyle.Bold); }
+
+                    using (font)
+                    {
+                        var textSize = g.MeasureString(text, font);
+                        float x = (width - textSize.Width) / 2;
+                        // Position vertically within the targetHeight, then offset by yOffset
+                        float y = yOffset + (drawHeight - textSize.Height) / 2;
+                        
+                        using (var brush = new SolidBrush(Color.Gold))
+                        {
+                            g.DrawString(text, font, brush, x, y + 1);
+                        }
+                    }
+                    return GetRawDmdBytes(bitmap, width, height, useGrayscale);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] GenerateDmdStaticTextFrame Error: {ex.Message}");
+                return new byte[0];
+            }
+        }
+
+        public byte[] GenerateDmdPersistentScoreFrame(string scoreText, int width, int height, bool useGrayscale)
+        {
+            try
+            {
+                using (var bitmap = new Bitmap(width, height))
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.Black);
+                    g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+                    
+                    // Specific Small Font for Score
+                    Font font;
+                    try { font = new Font("Arial", 8, FontStyle.Bold); }
+                    catch { font = new Font(FontFamily.GenericSansSerif, 8, FontStyle.Bold); }
+
+                    using (font)
+                    {
+                        var textSize = g.MeasureString(scoreText, font);
+                        var overlay = GetOverlayItem("score", true);
+                        float x, y;
+                        
+                        if (overlay != null && overlay.IsEnabled)
+                        {
+                            x = overlay.X + (overlay.Width - textSize.Width) / 2;
+                            y = overlay.Y + (overlay.Height - textSize.Height) / 2;
+                        }
+                        else
+                        {
+                            // Position: Top-Right with 2px margin
+                            x = width - textSize.Width - 2;
+                            y = 1;
+                        }
+                        
+                        using (var brush = new SolidBrush(Color.Gold))
+                        {
+                            // EN: Nudge text down slightly for visual centering
+                            float verticalNudge = 1.0f;
+                            g.DrawString(scoreText, font, brush, x, y + verticalNudge);
+                        }
+                    }
+                    return GetRawDmdBytes(bitmap, width, height, useGrayscale);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] GenerateDmdPersistentScoreFrame Error: {ex.Message}");
+                return new byte[0];
+            }
+        }
 
         /// <summary>
         /// Generates a composite image for DMD (128x32 usually)
         /// Fanart + Logo with Resize
         /// </summary>
-        public string ProcessDmdComposition(string fanartPath, string logoPath, string subFolder, int offsetX = 0, int offsetY = 0, int logoOffsetX = 0, int logoOffsetY = 0, bool isPreview = false)
+        public string ProcessDmdComposition(string fanartPath, string logoPath, string subFolder, int offsetX = 0, int offsetY = 0, int logoOffsetX = 0, int logoOffsetY = 0, bool isPreview = false, bool forceRegenerate = false)
         {
             try
             {
@@ -1083,13 +1792,13 @@ namespace RetroBatMarqueeManager.Application.Services
 
                 var logoName = Path.GetFileNameWithoutExtension(logoPath);
                 // EN: Use simple fixed filename (offsets stored in offsets.json)
-                // FR: Utiliser un nom de fichier simple fixe (offsets stockés dans offsets.json)
+                // FR: Utiliser un nom de fichier simple fixe (offsets stockÃ©s dans offsets.json)
                 string uniqueName = $"{logoName}_composed.png";
 
                 if (isPreview) uniqueName = $"preview_dmd_{logoName}_{DateTime.Now.Ticks}.png";
 
                 string targetPath = Path.Combine(dmdCacheDir, uniqueName);
-                if (!isPreview && File.Exists(targetPath))
+                if (!forceRegenerate && !isPreview && File.Exists(targetPath))
                 {
                     _logger.LogInformation($"[DMD CACHE REUSE] Found existing: {uniqueName}");
                     return targetPath;
@@ -1283,14 +1992,14 @@ namespace RetroBatMarqueeManager.Application.Services
             else
             {
                 // EN: Permanent Mode - Use simple fixed filename with offset metadata validation
-                // FR: Mode permanent - Utiliser un nom de fichier simple fixe avec validation des métadonnées d'offsets
+                // FR: Mode permanent - Utiliser un nom de fichier simple fixe avec validation des mÃ©tadonnÃ©es d'offsets
                 string simpleName = $"{fileName}_composed.png";
                 targetPath = Path.Combine(cacheDir, simpleName);
                 
                 if (File.Exists(targetPath))
                 {
                     // EN: Validate cached file has same offsets as current request
-                    // FR: Valider que le fichier en cache a les mêmes offsets que la requête actuelle
+                    // FR: Valider que le fichier en cache a les mÃªmes offsets que la requÃªte actuelle
                     bool offsetsMatch = ValidateOffsetMetadata(targetPath, offsetX, offsetY, fanartScale, logoOffsetX, logoOffsetY, logoScale);
                     
                     if (offsetsMatch)
@@ -1301,7 +2010,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     else
                     {
                         // EN: Offsets changed - Delete old cache and metadata, regenerate
-                        // FR: Offsets changés - Supprimer ancien cache et métadonnées, regénérer
+                        // FR: Offsets changÃ©s - Supprimer ancien cache et mÃ©tadonnÃ©es, regÃ©nÃ©rer
                         _logger.LogInformation($"[CACHE INVALID] Offsets changed, deleting old cache: {simpleName}");
                         try
                         {
@@ -1438,7 +2147,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 else
                 {
                     // EN: Use NorthWest for video offset preview (absolute coords like FFmpeg), Center for normal image editing
-                    // FR: Utiliser NorthWest pour preview offset vidéo (coords absolues comme FFmpeg), Center pour édition image normale  
+                    // FR: Utiliser NorthWest pour preview offset vidÃ©o (coords absolues comme FFmpeg), Center pour Ã©dition image normale  
                     // Video mode uses "video_preview" subfolder, image mode uses system subfolder (e.g., "gw")
                     string logoGravity = (subFolder == "video_preview") ? "NorthWest" : "Center";
                     args.Add("-gravity"); args.Add(logoGravity);
@@ -1493,7 +2202,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     // Clean up old permanent files when using preview mode (hotkeys)
                     // Clean up old permanent files when using preview mode (hotkeys)
                     // EN: Remove old composed files to prevent cache pollution
-                    // FR: Supprimer les anciens fichiers composés pour éviter la pollution du cache
+                    // FR: Supprimer les anciens fichiers composÃ©s pour Ã©viter la pollution du cache
                     if (isPreview)
                     {
                         try
@@ -1519,7 +2228,7 @@ namespace RetroBatMarqueeManager.Application.Services
                     }
                     
                     // EN: Save offset metadata for permanent files (enables cache validation on next load)
-                    // FR: Sauvegarder les métadonnées d'offsets pour les fichiers permanents (permet validation du cache au prochain chargement)
+                    // FR: Sauvegarder les mÃ©tadonnÃ©es d'offsets pour les fichiers permanents (permet validation du cache au prochain chargement)
                     if (!isPreview)
                     {
                         SaveOffsetMetadata(targetPath, offsetX, offsetY, fanartScale, logoOffsetX, logoOffsetY, logoScale);
@@ -1628,15 +2337,24 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
                 else
                 {
-                    // Resize with pixel-perfect mode (no smoothing) for DMD
+                    // Resize with aspect ratio preservation (Contain)
                     resized = new Bitmap(width, height, PixelFormat.Format32bppArgb);
                     needsDispose = true;
                     using (var g = Graphics.FromImage(resized))
                     {
-                        g.InterpolationMode = InterpolationMode.NearestNeighbor;  // Pixel-perfect for DMD
+                        g.Clear(Color.Black); // Background for DMD
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic; // Better for downscaling
                         g.PixelOffsetMode = PixelOffsetMode.Half;
-                        g.SmoothingMode = SmoothingMode.None;
-                        g.DrawImage(originalInfo, 0, 0, width, height);
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+                        // Calculate Aspect Ratio
+                        float scale = Math.Min((float)width / originalInfo.Width, (float)height / originalInfo.Height);
+                        int newW = (int)(originalInfo.Width * scale);
+                        int newH = (int)(originalInfo.Height * scale);
+                        int posX = (width - newW) / 2;
+                        int posY = (height - newH) / 2;
+
+                        g.DrawImage(originalInfo, posX, posY, newW, newH);
                     }
                 }
 
@@ -1668,21 +2386,23 @@ namespace RetroBatMarqueeManager.Application.Services
                             byte r = buffer[inIdx + 2];
                             byte a = buffer[inIdx + 3];
                             
-                            // CRITICAL: Handle transparency - treat transparent pixels as black
-                            // This prevents white backgrounds on transparent PNGs/SVGs
-                            if (a < 128) // Semi-transparent or fully transparent
+                            // CRITICAL: Handle transparency by blending against a black background
+                            // This simulates semi-transparency on the DMD
+                            float alpha = a / 255.0f;
+                            
+                            // Blend against black (0,0,0): Result = Source * Alpha + Background * (1 - Alpha)
+                            // Since Background is 0, Result = Source * Alpha
+                            r = (byte)(r * alpha);
+                            g = (byte)(g * alpha);
+                            b = (byte)(b * alpha);
+
+                            if (grayscale)
                             {
-                                r = 0;
-                                g = 0;
-                                b = 0;
+                                // Rec. 709 Weights (Modern Standard)
+                                // Attenduate slightly (0.85) to avoid "blinding whites" on physical DMDs
+                                byte gray = (byte)((r * 0.2126 + g * 0.7152 + b * 0.0722) * 0.85);
+                                result[outIdx++] = gray;
                             }
-                                                        if (grayscale)
-                                {
-                                    // Rec. 709 Weights (Modern Standard)
-                                    // Attenduate slightly (0.85) to avoid "blinding whites" on physical DMDs
-                                    byte gray = (byte)((r * 0.2126 + g * 0.7152 + b * 0.0722) * 0.85);
-                                    result[outIdx++] = gray;
-                                }
                             else
                             {
                                 // RGB
@@ -1709,14 +2429,14 @@ namespace RetroBatMarqueeManager.Application.Services
     
     /// <summary>
     /// EN: Save offset metadata for a composed file (only if custom offsets)
-    /// FR: Sauvegarder les métadonnées d'offsets pour un fichier composé (seulement si offsets personnalisés)
+    /// FR: Sauvegarder les mÃ©tadonnÃ©es d'offsets pour un fichier composÃ© (seulement si offsets personnalisÃ©s)
     /// </summary>
     private void SaveOffsetMetadata(string composedFilePath, int fanartOffsetX, int fanartOffsetY, double fanartScale, int logoOffsetX, int logoOffsetY, double logoScale)
     {
         try
         {
             // EN: Only save metadata if offsets are not default (0,0,1.0)
-            // FR: Sauvegarder les métadonnées seulement si offsets ne sont pas par défaut (0,0,1.0)
+            // FR: Sauvegarder les mÃ©tadonnÃ©es seulement si offsets ne sont pas par dÃ©faut (0,0,1.0)
             bool isDefaultOffsets = 
                 fanartOffsetX == 0 && fanartOffsetY == 0 && Math.Abs(fanartScale - 1.0) < 0.01 &&
                 logoOffsetX == 0 && logoOffsetY == 0 && Math.Abs(logoScale - 1.0) < 0.01;
@@ -1726,7 +2446,7 @@ namespace RetroBatMarqueeManager.Application.Services
             if (isDefaultOffsets)
             {
                 // EN: Delete metadata file if it exists (offsets reset to default)
-                // FR: Supprimer le fichier de métadonnées s'il existe (offsets réinitialisés par défaut)
+                // FR: Supprimer le fichier de mÃ©tadonnÃ©es s'il existe (offsets rÃ©initialisÃ©s par dÃ©faut)
                 if (File.Exists(metadataPath))
                 {
                     File.Delete(metadataPath);
@@ -1736,7 +2456,7 @@ namespace RetroBatMarqueeManager.Application.Services
             }
             
             // EN: Save metadata for custom offsets
-            // FR: Sauvegarder les métadonnées pour offsets personnalisés
+            // FR: Sauvegarder les mÃ©tadonnÃ©es pour offsets personnalisÃ©s
             var metadata = new
             {
                 fanartOffsetX,
@@ -1759,7 +2479,7 @@ namespace RetroBatMarqueeManager.Application.Services
     
     /// <summary>
     /// EN: Check if offset metadata matches current offsets
-    /// FR: Vérifier si les métadonnées d'offsets correspondent aux offsets actuels
+    /// FR: VÃ©rifier si les mÃ©tadonnÃ©es d'offsets correspondent aux offsets actuels
     /// </summary>
     private bool ValidateOffsetMetadata(string composedFilePath, int fanartOffsetX, int fanartOffsetY, double fanartScale, int logoOffsetX, int logoOffsetY, double logoScale)
     {
@@ -1768,7 +2488,7 @@ namespace RetroBatMarqueeManager.Application.Services
             var metadataPath = Path.ChangeExtension(composedFilePath, ".json");
             
             // EN: Check if requested offsets are default
-            // FR: Vérifier si les offsets demandés sont par défaut
+            // FR: VÃ©rifier si les offsets demandÃ©s sont par dÃ©faut
             bool requestedIsDefault = 
                 fanartOffsetX == 0 && fanartOffsetY == 0 && Math.Abs(fanartScale - 1.0) < 0.01 &&
                 logoOffsetX == 0 && logoOffsetY == 0 && Math.Abs(logoScale - 1.0) < 0.01;
@@ -1776,7 +2496,7 @@ namespace RetroBatMarqueeManager.Application.Services
             if (!File.Exists(metadataPath))
             {
                 // EN: No metadata = default offsets assumed. Valid if requested offsets are also default.
-                // FR: Pas de métadonnées = offsets par défaut supposés. Valide si offsets demandés sont aussi par défaut.
+                // FR: Pas de mÃ©tadonnÃ©es = offsets par dÃ©faut supposÃ©s. Valide si offsets demandÃ©s sont aussi par dÃ©faut.
                 if (requestedIsDefault)
                 {
                     _logger.LogInformation($"[OFFSET METADATA] No metadata (default offsets), requested offsets are also default - cache valid");
@@ -1867,7 +2587,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
             return File.Exists(placeholderPath) ? placeholderPath : _config.DefaultImagePath;
         }
-        public string GenerateScoreOverlay(int currentPoints, int totalPoints, bool isDmd)
+        public string GenerateScoreOverlay(int currentPoints, int totalPoints, bool isDmd, bool isHardcore = false, bool forceRegenerate = false)
         {
             try
             {
@@ -1883,12 +2603,13 @@ namespace RetroBatMarqueeManager.Application.Services
                    canvasHeight = _config.MarqueeHeight;
                 }
 
-                string text = $"{currentPoints}/{totalPoints} pts";
-                string outputFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "overlays");
+                string text = $"{currentPoints}/{totalPoints}";
+                string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
+                string outputFolder = Path.Combine(_config.CachePath, overlayFolder);
                 Directory.CreateDirectory(outputFolder);
 
                 // EN: Clean up old score overlays to prevent accumulation
-                // FR: Nettoyer les anciens overlays de score pour éviter l'accumulation
+                // FR: Nettoyer les anciens overlays de score pour Ã©viter l'accumulation
                 try
                 {
                     var prefix = $"score_overlay_{(isDmd ? "dmd" : "mpv")}_";
@@ -1901,24 +2622,28 @@ namespace RetroBatMarqueeManager.Application.Services
                 catch { }
 
                 // EN: Use unique filename to avoid file locking issues
-                // FR: Utiliser un nom de fichier unique pour éviter les problèmes de verrouillage de fichier
-                string outputPath = Path.Combine(outputFolder, $"score_overlay_{(isDmd ? "dmd" : "mpv")}_{DateTime.Now.Ticks}.png");
+                // FR: Utiliser un nom de fichier unique pour Ã©viter les problÃ¨mes de verrouillage de fichier
+                string timestamp = forceRegenerate ? $"_{DateTime.Now.Ticks}" : "";
+                string outputPath = Path.Combine(outputFolder, $"score_overlay_{(isDmd ? "dmd" : "mpv")}_{DateTime.Now.Ticks}{timestamp}.png");
 
                 using (var bitmap = new Bitmap(canvasWidth, canvasHeight, PixelFormat.Format32bppArgb))
                 using (var g = Graphics.FromImage(bitmap))
                 {
                     // EN: Pixel Text Rendering for Retro Look
-                    // FR: Rendu de texte pixel pour look rétro
+                    // FR: Rendu de texte pixel pour look rÃ©tro
                     g.SmoothingMode = SmoothingMode.None;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
                     g.Clear(Color.Transparent);
 
                     // Style configuration
-                    // EN: Adjust font size for small DMDs vs Large Marquee
-                    // FR: Ajuster taille police pour petits DMD vs Grand Marquee
-                    // Reduced sizes based on user feedback (overflow on DMD)
-                    // Dynamic scaling: Height / 24 (approx 15px at 360p, 45px at 1080p) - Reduced from /16 to avoid overlap
-                    int fontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : Math.Max(10, canvasHeight / 24);
+                    // EN: Proportional scaling based on target box height
+                    // FR: Scaling proportionnel basé sur la hauteur de la boîte cible
+                    var overlay = GetOverlayItem("score", isDmd);
+                    int refBoxHeight = isDmd ? (canvasHeight < 64 ? 32 : canvasHeight) : (overlay != null ? overlay.Height : canvasHeight / 6);
+                    float fontSize = (overlay != null && overlay.FontSize > 0) 
+                        ? overlay.FontSize 
+                        : (isDmd ? (refBoxHeight < 64 ? 6 : 10) : Math.Max(10, (int)(refBoxHeight * 0.5)));
+
                     var fontFamilyStr = _config.RAFontFamily;
                     var fontStyle = FontStyle.Bold;
                     
@@ -1957,60 +2682,186 @@ namespace RetroBatMarqueeManager.Application.Services
                     
                     using (font)
                     {
-                         var textSize = g.MeasureString(text, font);
-                            
-                         // Reduce padding for tighter fit but increase height for vertical centering
-                         int paddingX = isDmd ? 2 : 8;
-                         int paddingY = isDmd ? 4 : 10; 
-                            
-                         int boxWidth = (int)textSize.Width + (paddingX * 2);
-                         int boxHeight = (int)textSize.Height + (paddingY * 2);
+                          // EN: Measurement Loop for DMD Auto-fit
+                          // FR: Boucle de mesure pour l'ajustement automatique sur DMD
+                          SizeF textSize = SizeF.Empty;
+                          SizeF hcSize = SizeF.Empty;
+                          string hcText = "HC ";
+                          float currentFontSize = fontSize;
+                          bool textFits = false;
+                          int paddingX = isDmd ? 1 : 8;
+                          int paddingY = isDmd ? 0 : 10;
+                          int boxWidth = 0;
+                          int boxHeight = 0;
+                          Font effectiveFont = font!;
 
-                         int x, y;
+                          // EN: Iteratively reduce font size if it doesn't fit on target box
+                          // FR: Réduire itérativement la taille de la police si elle ne tient pas dans la zone cible
+                          int targetLimitWidth = canvasWidth;
+                          int targetLimitHeight = canvasHeight;
 
-                         if (isDmd)
-                         {
-                             // Centered for DMD
-                             x = (canvasWidth - boxWidth) / 2;
-                             y = (canvasHeight - boxHeight) / 2;
-                         }
-                         else
-                         {
-                             // Top-Right for MPV with margin
-                             int margin = 20;
-                             x = canvasWidth - boxWidth - margin;
-                             y = margin;
-                         }
+                          overlay = GetOverlayItem("score", isDmd); 
+                          if (overlay != null && !overlay.IsEnabled) return string.Empty;
 
-                         // Draw Background Box (Semi-transparent Gray)
-                         using (var brush = new SolidBrush(Color.FromArgb(180, 40, 40, 40)))
-                         {
-                             g.FillRectangle(brush, x, y, boxWidth, boxHeight);
-                         }
-                            
-                         // Draw Border
-                         using (var pen = new Pen(Color.FromArgb(200, 255, 215, 0), 1)) // Gold border
-                         {
-                             g.DrawRectangle(pen, x, y, boxWidth, boxHeight);
-                         }
+                          if (overlay != null)
+                          {
+                              targetLimitWidth = overlay.Width;
+                              targetLimitHeight = overlay.Height;
+                              // EN: For DMD, allow utilizing full canvas width even if overlay is defined narrower (auto-expand)
+                              // FR: Pour DMD, permettre d'utiliser toute la largeur du canvas même si l'overlay est défini plus étroit
+                              if (isDmd) targetLimitWidth = canvasWidth;
+                          }
 
-                         // Draw Text (White) with Manual Centering and Nudge
-                         using (var brush = new SolidBrush(Color.White))
-                         {
-                              // Calculate intended top-left of text based on padding
-                              // This places the text 'box' exactly inside our padding
-                              float textX = x + paddingX;
-                              float textY = y + paddingY;
+                          // EN: Provide a manual override: If FontSize is set by user, we trust it and skip auto-shrink
+                          // FR: S'il y a une taille définie par l'utilisateur, on l'utilise telle quelle (pas de réduction auto)
+                          bool isFixedSize = (overlay != null && overlay.FontSize > 0);
 
-                              // EN: Nudge text down slightly for visual centering (compensate for ascenders/descenders)
-                              // FR: Décaler légèrement le texte vers le bas pour le centrage visuel (compenser ascendants/descendants)
-                              // Increased nudge based on user feedback "not centered vertically" (usually means too high)
-                              float verticalNudge = isDmd ? 1.0f : 3.0f;
+                          while (!isFixedSize && !textFits && currentFontSize >= 5)
+                          {
+                              // Create a temporary font for testing if size changed
+                              using (var tempFont = (currentFontSize == fontSize) ? null : new Font(font?.FontFamily ?? FontFamily.GenericSansSerif, currentFontSize, fontStyle))
+                              {
+                                  var activeFont = tempFont ?? font;
+                                  if (activeFont == null) break;
+
+                                  textSize = g.MeasureString(text, activeFont);
+                                  hcSize = isHardcore ? g.MeasureString(hcText, activeFont) : SizeF.Empty;
+                                  boxWidth = (int)(textSize.Width + hcSize.Width) + (paddingX * 2);
+                                  boxHeight = (int)Math.Max(textSize.Height, hcSize.Height) + (paddingY * 2);
+                                  
+                                  // EN: Check both width and height fit within target rectangle (box or canvas)
+                                  // FR: Vérifier que la largeur et la hauteur tiennent dans le rectangle cible
+                                  if (boxWidth <= targetLimitWidth * 0.98f && boxHeight <= targetLimitHeight)
+                                  {
+                                      textFits = true;
+                                      if (tempFont != null)
+                                      {
+                                          effectiveFont = new Font(activeFont.FontFamily, currentFontSize, fontStyle);
+                                      }
+                                  }
+                                  else
+                                  {
+                                      currentFontSize -= 0.5f;
+                                  }
+                              }
+                          }
+                          
+                          // EN: Calculate dimensions for fixed size case if loop was skipped
+                          if (isFixedSize)
+                          {
+                              textSize = g.MeasureString(text, effectiveFont);
+                              hcSize = isHardcore ? g.MeasureString(hcText, effectiveFont) : SizeF.Empty;
+                              boxWidth = (int)(textSize.Width + hcSize.Width) + (paddingX * 2);
+                              boxHeight = (int)Math.Max(textSize.Height, hcSize.Height) + (paddingY * 2);
+                          }
+
+                          try
+                          {
+                              int x, y;
+                              int finalBoxWidth = boxWidth;
+                              int finalBoxHeight = boxHeight;
+
+                              if (overlay != null)
+                              {
+                                  x = overlay.X;
+                                  y = overlay.Y;
+                                  finalBoxWidth = Math.Max(boxWidth, overlay.Width); // Auto-expand for long text / FR: Auto-agrandir
+                                  
+                                  // EN: If DMD and expanded beyond overlay width, re-center horizontally on canvas
+                                  // FR: Si DMD et agrandi au-delà de la largeur de l'overlay, recentrer horizontalement sur le canvas
+                                  if (isDmd && finalBoxWidth > overlay.Width)
+                                  {
+                                      x = (canvasWidth - finalBoxWidth) / 2;
+                                  }
+                                  finalBoxHeight = overlay.Height;
+                              }
+                              else if (isDmd)
+                              {
+                                  // Centered for DMD / FR: Centré pour DMD
+                                  x = (canvasWidth - boxWidth) / 2;
+                                  y = (canvasHeight - boxHeight) / 2;
+                                  y += 3; // EN: Move down specific amount requested / FR: Descendre selon demande
+                              }
+                              else
+                              {
+                                  // Top-Right for MPV with margin
+                                  int margin = 20;
+                                  x = canvasWidth - boxWidth - margin;
+                                  y = margin;
+                              }
+
+                              // Draw Background Box
+                              Color bgColor = Color.FromArgb(180, 40, 40, 40); // Default semi-transparent grey
+                              if (isDmd) bgColor = Color.FromArgb(255, 60, 60, 60); // EN: Solid Dark Gray for DMD Masking / FR: Gris foncé opaque pour le masquage DMD
+
+                              if (bgColor.A > 0)
+                              {
+                                  using (var brush = new SolidBrush(bgColor))
+                                  {
+                                      g.FillRectangle(brush, x, y, finalBoxWidth, finalBoxHeight);
+                                  }
+                              }
+                                 
+                              // Draw Border
+                              var resolvedTextColor = GetColorFromHex(overlay?.TextColor ?? "", Color.Gold); // Renamed to avoid capture if needed, though local scope is fine
                               
-                              g.DrawString(text, font, brush, textX, textY + verticalNudge);
+                              // EN: For MPV, we always draw a border (Gold/Silver)
+                              // FR: Pour MPV, on dessine toujours une bordure (Or/Argent)
+                              Color borderColor = isHardcore ? Color.Gold : Color.Silver;
+                              // EN: REMOVED: Do not override border color with text color on DMD
+                              // FR: RETIRÉ : Ne pas écraser la couleur de bordure avec la couleur du texte sur DMD
+                              // if (isDmd) borderColor = Color.FromArgb(200, textColor.R, textColor.G, textColor.B);
+
+                              using (var pen = new Pen(borderColor, isDmd ? 1 : 2))
+                              {
+                                  g.DrawRectangle(pen, x, y, finalBoxWidth, finalBoxHeight);
+                              }
+
+                             // Draw Text
+                              using (var brush = new SolidBrush(resolvedTextColor))
+                              {
+                                  // Horizontal Centering Calculation
+                                  float totalWidth = textSize.Width + hcSize.Width;
+                                  float currentX = x + (finalBoxWidth - totalWidth) / 2;
+                                  float textOffsetY = isDmd ? 1f : 0f; // EN: Shift text down inside frame / FR: Décaler texte vers le bas dans le cadre
+                                  
+                                  var centerFormat = new StringFormat 
+                                  { 
+                                      Alignment = StringAlignment.Near, 
+                                      LineAlignment = StringAlignment.Center,
+                                      FormatFlags = StringFormatFlags.NoWrap
+                                  };
+                                  
+                                  if (isHardcore)
+                                  {
+                                      using (var hcBrush = new SolidBrush(Color.Red))
+                                      {
+                                          var hcRect = new RectangleF(currentX, y + textOffsetY, hcSize.Width, finalBoxHeight);
+                                          // Note: DrawStringWithOutline might need adaptation for HC, but usually HC is small enough.
+                                          // However, let's just use standard DrawString for HC to be safe or use outline if consistency is needed.
+                                          // Score usually needs outline on DMD.
+                                          DrawStringWithOutline(g, hcText, effectiveFont, hcBrush, hcRect, centerFormat, isDmd);
+                                      }
+                                      currentX += hcSize.Width;
+                                  }
+                                  
+                                  // EN: Expand Score Rect slightly to prevent wrap / FR: Élargir légérement le rect Score pour éviter le retour à la ligne
+                                  var scoreRect = new RectangleF(currentX, y + textOffsetY, textSize.Width + 5, finalBoxHeight);
+                                  DrawStringWithOutline(g, text, effectiveFont, brush, scoreRect, centerFormat, isDmd);
+                             }
+                         }
+                         finally
+                         {
+                             // EN: Dispose effectiveFont if it was a newly created one
+                             // FR: LibÃ©rer effectiveFont s'il s'agissait d'une nouvelle instance
+                             if (effectiveFont != null && effectiveFont != font)
+                             {
+                                 effectiveFont.Dispose();
+                             }
                          }
                          
                          bitmap.Save(outputPath, ImageFormat.Png);
+                         _logger.LogInformation($"[RA Score] Generated score overlay ({(isDmd ? "DMD" : "MPV")}): {outputPath}");
                     }
                     return outputPath;
                 }
@@ -2024,7 +2875,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
         /// <summary>
         /// EN: Generate locked badge from normal badge (grayscale + darkened)
-        /// FR: Générer badge verrouillé depuis badge normal (niveaux de gris + assombri)
+        /// FR: GÃ©nÃ©rer badge verrouillÃ© depuis badge normal (niveaux de gris + assombri)
         /// </summary>
         public string? GenerateBadgeLockFromNormal(string normalBadgePath, int gameId, int achievementId)
         {
@@ -2036,23 +2887,19 @@ namespace RetroBatMarqueeManager.Application.Services
 
             try
             {
-                var lockCacheDir = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "medias", "retroachievements", "badges_lock",
-                    gameId.ToString()
-                );
+                var lockCacheDir = Path.Combine(_config.CachePath, "badges_lock", gameId.ToString());
                 Directory.CreateDirectory(lockCacheDir);
 
                 var lockPath = Path.Combine(lockCacheDir, $"{achievementId}_lock_generated.png");
 
-                // EN: Check cache / FR: Vérifier cache
+                // EN: Check cache / FR: VÃ©rifier cache
                 if (File.Exists(lockPath))
                 {
                     _logger.LogDebug($"[RA Badge Lock] Found cached: {lockPath}");
                     return lockPath;
                 }
 
-                // EN: Generate grayscale / FR: Générer niveaux de gris
+                // EN: Generate grayscale / FR: GÃ©nÃ©rer niveaux de gris
                 using (var sourceImage = Image.FromFile(normalBadgePath))
                 using (var grayBitmap = new Bitmap(sourceImage.Width, sourceImage.Height))
                 {
@@ -2078,7 +2925,7 @@ namespace RetroBatMarqueeManager.Application.Services
                             attributes);
                     }
 
-                    // EN: Darken (50% opacity black overlay) / FR: Assombrir (overlay noir 50% opacité)
+                    // EN: Darken (50% opacity black overlay) / FR: Assombrir (overlay noir 50% opacitÃ©)
                     using (var g = Graphics.FromImage(grayBitmap))
                     using (var brush = new SolidBrush(Color.FromArgb(128, Color.Black)))
                     {
@@ -2098,14 +2945,47 @@ namespace RetroBatMarqueeManager.Application.Services
         }
 
         /// <summary>
+        /// EN: Get the capacity and sizing of the badge ribbon based on template
+        /// FR: Obtenir la capacitÃ© et le dimensionnement du bandeau de badges basÃ© sur le template
+        /// </summary>
+        public (int BadgeSize, int MaxBadgesPerFrame) GetBadgeRibbonCapacity(bool isDmd)
+        {
+            int screenWidth = isDmd ? (_config.DmdWidth > 0 ? _config.DmdWidth : 128) : _config.MarqueeWidth;
+            int screenHeight = isDmd ? (_config.DmdHeight > 0 ? _config.DmdHeight : 32) : _config.MarqueeHeight;
+            
+            var overlay = GetOverlayItem("badges", isDmd);
+            int ribbonWidth, ribbonHeight;
+
+            if (overlay != null && overlay.IsEnabled)
+            {
+                ribbonWidth = overlay.Width;
+                ribbonHeight = overlay.Height;
+            }
+            else
+            {
+                ribbonWidth = screenWidth;
+                // Default logic fallback:
+                ribbonHeight = isDmd ? 16 : (int)(screenHeight / 4.5);
+            }
+
+            int badgeSize = isDmd ? Math.Min(32, ribbonHeight) : ribbonHeight;
+            int spacing = isDmd ? 0 : 1;
+            int maxBadges = Math.Max(1, ribbonWidth / (badgeSize + spacing));
+
+            return (badgeSize, maxBadges);
+        }
+
+        /// <summary>
         /// EN: Generate badge ribbon overlay (locked/unlocked badges in horizontal ribbon)
-        /// FR: Générer overlay de bandeau de badges (badges verrouillés/déverrouillés en bandeau horizontal)
+        /// FR: GÃ©nÃ©rer overlay de bandeau de badges (badges verrouillÃ©s/dÃ©verrouillÃ©s en bandeau horizontal)
         /// </summary>
         public async Task<string> GenerateBadgeRibbonOverlay(
             Dictionary<string, Achievement> achievements,
             int gameId,
             RetroAchievementsService raService,
-            bool isDmd)
+            bool isDmd,
+            bool isHardcore = false,
+            bool forceRegenerate = false)
         {
             if (achievements == null || achievements.Count == 0)
             {
@@ -2115,26 +2995,50 @@ namespace RetroBatMarqueeManager.Application.Services
 
             try
             {
-                // EN: Calculate dimensions / FR: Calculer les dimensions
                 int screenWidth = isDmd ? (_config.DmdWidth > 0 ? _config.DmdWidth : 128) : _config.MarqueeWidth;
                 int screenHeight = isDmd ? (_config.DmdHeight > 0 ? _config.DmdHeight : 32) : _config.MarqueeHeight;
                 
-                // Dynamic badge size: Height / 7.2 (approx 50px at 360p, 150px at 1080p) - Reduced from /5.6
-                int badgeSize = isDmd ? 32 : (int)(screenHeight / 7.2);
+                var overlay = GetOverlayItem("badges", isDmd);
+                int ribbonX = 0;
+                int ribbonY, ribbonWidth, ribbonHeight;
+
+                    if (overlay != null)
+                    {
+                        if (!overlay.IsEnabled) return string.Empty;
+                        ribbonX = overlay.X;
+                        ribbonY = overlay.Y;
+                        ribbonWidth = overlay.Width;
+                        ribbonHeight = overlay.Height;
+                    }
+                    else
+                    {
+                        ribbonWidth = screenWidth;
+                        ribbonHeight = isDmd ? 16 : (int)(screenHeight / 4.5);
+                        ribbonY = screenHeight - ribbonHeight; // EN: Align to bottom / FR: Aligner en bas
+                    }
+
+                // Dynamic badge size
+                int badgeSize = isDmd ? Math.Min(32, ribbonHeight) : ribbonHeight;
                 
-                // EN: Locked badges show top 30% (peek effect) / FR: Badges verrouillés affichent haut 30% (effet aperçu)
+                // EN: Locked badges show top 30% (peek effect)
                 double peekPercentage = 0.30;
                 int peekHeight = (int)(badgeSize * peekPercentage);
                 
-                // EN: Add safety padding at bottom to ensure visibility / FR: Ajouter marge sécurité en bas
-                int bottomPadding = 0; // Removed extra padding per user request to close gap
+                bool isTopMode = (overlay != null && overlay.Y <= 2);
 
+                // EN: Position badges so locked (30% top/bottom) stick to the edge of the ribbon/box
+                // FR: Positionner les badges pour que le verrouillage (30% haut/bas) colle au bord du bandeau
+                int baseY;
+                if (isTopMode)
+                {
+                    baseY = ribbonY;
+                }
+                else
+                {
+                    baseY = (overlay != null && overlay.IsEnabled) ? ribbonY + (ribbonHeight - peekHeight) : screenHeight - peekHeight;
+                }
                 
-                // EN: Position badges so locked (30% top) stick to bottom edge (tile effect)
-                // FR: Positionner badges pour que locked (30% haut) collent au bord bas (effet tuile)
-                int baseY = screenHeight - peekHeight - bottomPadding; // Locked badges at screen bottom with padding
-                
-                // EN: Create transparent canvas / FR: Créer canevas transparent
+                // EN: Create transparent canvas
                 using (var bitmap = new Bitmap(screenWidth, screenHeight, PixelFormat.Format32bppArgb))
                 using (var g = Graphics.FromImage(bitmap))
                 {
@@ -2143,18 +3047,20 @@ namespace RetroBatMarqueeManager.Application.Services
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     
-                    int spacing = isDmd ? 0 : 1; // EN: No spacing for DMD (128/32=4), minimal for MPV / FR: Pas d'espace pour DMD (128/32=4), minimal pour MPV
-                    int x = 0;
+                    int spacing = isDmd ? 0 : 1;
+                    int x = ribbonX;
+                    int xMax = ribbonX + ribbonWidth;
                     
-                    // EN: Sort achievements by DisplayOrder / FR: Trier succès par DisplayOrder
+                    // EN: Sort achievements by DisplayOrder / FR: Trier succÃ¨s par DisplayOrder
                     var sortedAchievements = achievements.Values
                         .OrderBy(a => a.DisplayOrder)
                         .ToList();
                     
                     foreach (var achievement in sortedAchievements)
                     {
-                        // EN: Stop if we exceed screen width / FR: Arrêter si on dépasse la largeur d'écran
-                        if (x + badgeSize > screenWidth)
+                        // EN: Stop if we exceed screen width (allow 10px tolerance for DMD to ensure 4th badge)
+                        // FR: Arrêter si on dépasse la largeur (tolérance 10px pour DMD pour assurer le 4ème badge)
+                        if (x + badgeSize > xMax + (isDmd ? 10 : 0))
                         {
                             _logger.LogDebug($"[RA Ribbon] Reached screen width limit, displayed {sortedAchievements.IndexOf(achievement)} badges");
                             break;
@@ -2162,14 +3068,16 @@ namespace RetroBatMarqueeManager.Application.Services
                         
                         string? badgePath = null;
                         
-                        if (achievement.Unlocked)
+                        bool isUnlocked = isHardcore ? achievement.DateEarnedHardcore.HasValue : achievement.Unlocked;
+
+                        if (isUnlocked)
                         {
-                            // EN: Get unlocked badge / FR: Obtenir badge déverrouillé
+                            // EN: Get unlocked badge / FR: Obtenir badge dÃ©verrouillÃ©
                             badgePath = await raService.GetBadgePath(gameId, achievement.ID);
                         }
                         else
                         {
-                            // EN: Get locked badge / FR: Obtenir badge verrouillé
+                            // EN: Get locked badge / FR: Obtenir badge verrouillÃ©
                             badgePath = await raService.GetBadgeLockPath(gameId, achievement.ID);
                         }
                         
@@ -2181,28 +3089,30 @@ namespace RetroBatMarqueeManager.Application.Services
                         
                         try
                         {
-                            using (var badge = Image.FromFile(badgePath))
-                            {
-                                if (achievement.Unlocked)
+                                if (isUnlocked)
                                 {
-                                    // EN: Draw full badge - rises up from locked position (tile effect)
-                                    // FR: Dessiner badge complet - monte depuis position locked (effet tuile)
-                                    int unlockedY = baseY - (badgeSize - peekHeight);
-                                    g.DrawImage(badge, new Rectangle(x, unlockedY, badgeSize, badgeSize));
+                                    // EN: Draw full badge filling the ribbon - rises up or drops down (tile effect)
+                                    // FR: Dessiner badge complet remplissant le bandeau - monte ou descend (effet tuile)
+                                    int unlockedY = ribbonY;
+                                    
+                                    bool badgeIsHc = achievement.DateEarnedHardcore.HasValue;
+                                    DrawBadgeWithFrame(g, badgePath, x, unlockedY, badgeSize, badgeIsHc, isDmd);
                                 }
                                 else
                                 {
-                                    // EN: Draw partial badge - top 30% stuck to bottom edge
-                                    // FR: Dessiner badge partiel - haut 30% collé au bord bas
-                                    int srcY = 0; // EN: Start from top / FR: Commencer depuis le haut
-                                    int srcHeight = (int)(badge.Height * peekPercentage);
-                                    
-                                    var srcRect = new Rectangle(0, srcY, badge.Width, srcHeight);
-                                    var destRect = new Rectangle(x, baseY, badgeSize, peekHeight);
-                                    
-                                    g.DrawImage(badge, destRect, srcRect, GraphicsUnit.Pixel);
+                                    // EN: Draw partial badge - top or bottom 30% stuck to the edge
+                                    // FR: Dessiner badge partiel - haut ou bas 30% collé au bord
+                                    using (var badge = Image.FromFile(badgePath))
+                                    {
+                                        int srcY = isTopMode ? badge.Height - Math.Max(1, (int)(badge.Height * peekPercentage)) : 0;
+                                        int srcHeight = (int)(badge.Height * peekPercentage);
+                                        
+                                        var srcRect = new Rectangle(0, srcY, badge.Width, srcHeight);
+                                        var destRect = new Rectangle(x, baseY, badgeSize, peekHeight);
+                                        
+                                        g.DrawImage(badge, destRect, srcRect, GraphicsUnit.Pixel);
+                                    }
                                 }
-                            }
                         }
                         catch (Exception ex)
                         {
@@ -2213,7 +3123,8 @@ namespace RetroBatMarqueeManager.Application.Services
                     }
                     
                     // EN: Save overlay / FR: Sauvegarder overlay
-                    string outputFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "overlays");
+                    string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
+                    string outputFolder = Path.Combine(_config.CachePath, overlayFolder);
                     Directory.CreateDirectory(outputFolder);
                     
                     // EN: Clean up old ribbon overlays / FR: Nettoyer anciens overlays de bandeau
@@ -2246,7 +3157,7 @@ namespace RetroBatMarqueeManager.Application.Services
         /// EN: Compose score and badges into single overlay image for MPV
         /// FR: Composer score et badges en une seule image overlay pour MPV
         /// </summary>
-        public string ComposeScoreAndBadges(string? scorePath, string? badgesPath, string? countPath = null, int screenWidth = 1920, int screenHeight = 360)
+        public string ComposeScoreAndBadges(string? scorePath, string? badgesPath, string? countPath = null, int screenWidth = 1920, int screenHeight = 360, bool isHardcore = false, bool isDmd = false)
         {
             try
             {
@@ -2256,45 +3167,44 @@ namespace RetroBatMarqueeManager.Application.Services
                     g.Clear(Color.Transparent);
                     g.CompositingMode = CompositingMode.SourceOver;
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    
-                    // EN: Draw badges at bottom-left / FR: Dessiner badges en bas-gauche
-                    if (!string.IsNullOrEmpty(badgesPath) && File.Exists(badgesPath))
+
+                    // EN: Define drawing elements with their Z-Order
+                    // FR: DÃ©finir les Ã©lÃ©ments Ã  dessiner avec leur Z-Order
+                    var itemsToDraw = new List<dynamic>();
+
+                    if (!string.IsNullOrEmpty(badgesPath) && File.Exists(badgesPath)) 
+                        itemsToDraw.Add(new { Path = badgesPath, Type = "badges", Z = GetOverlayItem("badges", isDmd)?.ZOrder ?? 1 });
+
+                    if (!string.IsNullOrEmpty(countPath) && File.Exists(countPath)) 
+                        itemsToDraw.Add(new { Path = countPath, Type = "count", Z = GetOverlayItem("count", isDmd)?.ZOrder ?? 2 });
+
+                    if (!string.IsNullOrEmpty(scorePath) && File.Exists(scorePath)) 
+                        itemsToDraw.Add(new { Path = scorePath, Type = "score", Z = GetOverlayItem("score", isDmd)?.ZOrder ?? 3 });
+
+                    // EN: Sort by Z-Order / FR: Trier par Z-Order
+                    var sortedItems = itemsToDraw.OrderBy(i => (int)i.Z).ToList();
+
+                    foreach (var item in sortedItems)
                     {
-                        using (var badges = Image.FromFile(badgesPath))
+                        using (var img = Image.FromFile(item.Path))
                         {
-                            // EN: Check if it's a full screen overlay (like notification) or a ribbon
-                            // FR: Vérifier s'il s'agit d'un overlay plein écran (comme une notif) ou d'un ruban
-                            bool isFullScreen = badges.Height == screenHeight && badges.Width == screenWidth;
-                            int badgesY = isFullScreen ? 0 : screenHeight - badges.Height;
-                            
-                            g.DrawImage(badges, 0, badgesY, badges.Width, badges.Height);
+                            if (item.Type == "badges")
+                            {
+                                bool isFullScreen = img.Height == screenHeight && img.Width == screenWidth;
+                                int badgesY = isFullScreen ? 0 : screenHeight - img.Height;
+                                g.DrawImage(img, 0, badgesY, img.Width, img.Height);
+                            }
+                            else
+                            {
+                                // EN: Draw at (0,0) as positions are handled internally in their respective generation methods
+                                g.DrawImage(img, 0, 0, screenWidth, screenHeight);
+                            }
                         }
                     }
                     
-                    // EN: Draw count at top-left / FR: Dessiner compteur en haut-gauche
-                    if (!string.IsNullOrEmpty(countPath) && File.Exists(countPath))
-                    {
-                        using (var count = Image.FromFile(countPath))
-                        {
-                            // EN: Draw at (0,0) as margins are handled internally in GenerateAchievementCountOverlay
-                            // FR: Dessiner à (0,0) car les marges sont gérées en interne
-                            g.DrawImage(count, 0, 0, screenWidth, screenHeight);
-                        }
-                    }
-                    
-                    // EN: Draw score at top-right / FR: Dessiner score en haut-droite
-                    if (!string.IsNullOrEmpty(scorePath) && File.Exists(scorePath))
-                    {
-                        using (var score = Image.FromFile(scorePath))
-                        {
-                            // EN: Draw at (0,0) as margins are handled internally in GenerateScoreOverlay
-                            // FR: Dessiner à (0,0) car les marges sont gérées en interne
-                            g.DrawImage(score, 0, 0, screenWidth, screenHeight);
-                        }
-                    }
-                    
-                    // EN: Save composed overlay / FR: Sauvegarder overlay composé
-                    string outputFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "overlays");
+                    // EN: Save composed overlay / FR: Sauvegarder overlay composÃ©
+                    string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
+                    string outputFolder = Path.Combine(_config.CachePath, overlayFolder);
                     Directory.CreateDirectory(outputFolder);
                     
                     string outputPath = Path.Combine(outputFolder, $"composed_mpv_{DateTime.Now.Ticks}.png");
@@ -2313,9 +3223,9 @@ namespace RetroBatMarqueeManager.Application.Services
         
         /// <summary>
         /// EN: Generate achievement count overlay (unlocked/total)
-        /// FR: Générer overlay compteur achievements (débloqués/total)
+        /// FR: GÃ©nÃ©rer overlay compteur achievements (dÃ©bloquÃ©s/total)
         /// </summary>
-        public string GenerateAchievementCountOverlay(int unlockedCount, int totalCount, bool isDmd)
+        public string GenerateAchievementCountOverlay(int unlockedCount, int totalCount, bool isDmd, bool isHardcore = false, bool forceRegenerate = false)
         {
             try
             {
@@ -2332,7 +3242,9 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
 
                 string text = $"{unlockedCount}/{totalCount}";
-                string outputFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "overlays");
+                // if (isHardcore) text = $"HC {text}"; // EN: Handled separately now for coloring / FR: Géré séparément maintenant pour la coloration
+                string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
+                string outputFolder = Path.Combine(_config.CachePath, overlayFolder);
                 Directory.CreateDirectory(outputFolder);
 
                 // EN: Clean up old count overlays / FR: Nettoyer anciens overlays compteur
@@ -2347,27 +3259,35 @@ namespace RetroBatMarqueeManager.Application.Services
                 }
                 catch { }
 
-                string outputPath = Path.Combine(outputFolder, $"achievement_count_{(isDmd ? "dmd" : "mpv")}_{DateTime.Now.Ticks}.png");
+                string timestamp = forceRegenerate ? $"_{DateTime.Now.Ticks}" : "";
+                string outputPath = Path.Combine(outputFolder, $"achievement_count_{(isDmd ? "dmd" : "mpv")}_{DateTime.Now.Ticks}{timestamp}.png");
 
                 using (var bitmap = new Bitmap(canvasWidth, canvasHeight, PixelFormat.Format32bppArgb))
                 using (var g = Graphics.FromImage(bitmap))
                 {
-                    // EN: Pixel Text Rendering for Retro Look / FR: Rendu texte pixel look rétro
+                    // EN: Pixel Text Rendering for Retro Look / FR: Rendu texte pixel look rÃ©tro
                     g.SmoothingMode = SmoothingMode.None;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
                     g.Clear(Color.Transparent);
 
-                    // EN: Same style as score / FR: Même style que score
-                    // Dynamic scaling: Height / 24
-                    int fontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : Math.Max(10, canvasHeight / 24);
+                    // EN: Proportional scaling based on target box height
+                    // FR: Scaling proportionnel basé sur la hauteur de la boîte cible
+                    var overlayMeta = GetOverlayItem("count", isDmd);
+                    int refBoxH = isDmd ? (canvasHeight < 64 ? 32 : canvasHeight) : (overlayMeta != null ? overlayMeta.Height : canvasHeight / 6);
+                    float fontSize = (overlayMeta != null && overlayMeta.FontSize > 0)
+                        ? overlayMeta.FontSize
+                        : (isDmd ? (refBoxH < 64 ? 7 : 10) : Math.Max(10, (int)(refBoxH * 0.5)));
                     var fontStyle = FontStyle.Bold;
                     
                     Font? font = null;
                     PrivateFontCollection? pfc = null;
 
+                    string raFontFamily = _config.RAFontFamily;
+                    if (string.IsNullOrEmpty(raFontFamily)) raFontFamily = "Arial";
+
                     try
                     {
-                        // EN: Try Loading Custom Font File / FR: Essayer charger fichier police personnalisé
+                        // EN: Try Loading Custom Font File / FR: Essayer charger fichier police personnalisÃ©
                         string fontsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "fonts");
                         if (Directory.Exists(fontsDir))
                         {
@@ -2387,26 +3307,102 @@ namespace RetroBatMarqueeManager.Application.Services
 
                     if (font == null)
                     {
-                        font = new Font("Arial", fontSize, fontStyle);
+                        font = new Font(raFontFamily, fontSize, fontStyle);
                     }
                     
                     using (font)
                     {
-                        var textSize = g.MeasureString(text, font);
-                            
+                        // EN: Auto-fit Loop for Count
+                        float currentFontSize = fontSize;
+                        bool textFits = false;
                         int paddingX = isDmd ? 2 : 8;
                         int paddingY = isDmd ? 4 : 10;
+                        int boxWidth = 0;
+                        int boxHeight = 0;
+                        Font effectiveFont = font;
+                        
+                        // Define limits
+                        int targetLimitWidth = canvasWidth;
+                        int targetLimitHeight = canvasHeight;
+                        if (overlayMeta != null) 
+                        {
+                            targetLimitWidth = overlayMeta.Width;
+                            targetLimitHeight = overlayMeta.Height;
+                            if (isDmd) targetLimitWidth = canvasWidth; // Same DMD expansion rule
+                        }
+
+                        // EN: Manual override check
+                        bool isFixedSize = (overlayMeta != null && overlayMeta.FontSize > 0);
+
+                        while (!isFixedSize && !textFits && currentFontSize >= 5)
+                        {
+                            using (var tempFont = (currentFontSize == fontSize) ? null : new Font(font.FontFamily, currentFontSize, fontStyle))
+                            {
+                                var activeFont = tempFont ?? font;
+                                var textSize = g.MeasureString(text, activeFont);
+                                var hcSize = isHardcore ? g.MeasureString("HC ", activeFont) : SizeF.Empty;
+
+                                boxWidth = (int)(textSize.Width + hcSize.Width) + (paddingX * 2);
+                                boxHeight = (int)Math.Max(textSize.Height, hcSize.Height) + (paddingY * 2);
+                                
+                                // Check fit
+                                if (boxWidth <= targetLimitWidth * 0.98f && boxHeight <= targetLimitHeight)
+                                {
+                                    textFits = true;
+                                    if (tempFont != null) effectiveFont = new Font(activeFont.FontFamily, currentFontSize, fontStyle); 
+                                }
+                                else
+                                {
+                                    currentFontSize -= 0.5f;
+                                }
+                            }
+                        }
+
+                        if (isFixedSize)
+                        {
+                            var textSize = g.MeasureString(text, effectiveFont);
+                            var hcSize = isHardcore ? g.MeasureString("HC ", effectiveFont) : SizeF.Empty;
+                            boxWidth = (int)(textSize.Width + hcSize.Width) + (paddingX * 2);
+                            boxHeight = (int)Math.Max(textSize.Height, hcSize.Height) + (paddingY * 2);
+                        }
+                        
+                         // Update variables for drawing
+                        var textSizeFinal = g.MeasureString(text, effectiveFont);
+                        var hcSizeFinal = isHardcore ? g.MeasureString("HC ", effectiveFont) : SizeF.Empty;
+                        // font = effectiveFont; // REMOVED: Avoid reassigning using variable (CS0728)
                             
-                        int boxWidth = (int)textSize.Width + (paddingX * 2);
-                        int boxHeight = (int)textSize.Height + (paddingY * 2);
+                        boxWidth = (int)(textSizeFinal.Width + hcSizeFinal.Width) + (paddingX * 2);
+                        boxHeight = (int)Math.Max(textSizeFinal.Height, hcSizeFinal.Height) + (paddingY * 2);
+
+                        var overlay = GetOverlayItem("count", isDmd);
+                        if (overlay != null && !overlay.IsEnabled) return string.Empty;
 
                         int x, y;
+                        int finalBoxWidth = boxWidth;
+                        int finalBoxHeight = boxHeight;
 
-                        if (isDmd)
+                        if (overlay != null)
                         {
-                            // EN: Centered for DMD / FR: Centré pour DMD
-                            x = (canvasWidth - boxWidth) / 2;
-                            y = (canvasHeight - boxHeight) / 2;
+                            x = overlay.X;
+                            y = overlay.Y;
+                            finalBoxWidth = Math.Max(boxWidth, overlay.Width); // Auto-expand for long text / FR: Auto-agrandir
+                            finalBoxHeight = overlay.Height;
+                            
+                            // EN: Re-center if expanded on DMD
+                            if (isDmd && finalBoxWidth > overlay.Width)
+                            {
+                                x = (canvasWidth - finalBoxWidth) / 2;
+                            }
+                        }
+                        else if (isDmd)
+                        {
+                            // EN: Centered for DMD / FR: CentrÃ© pour DMD
+                            // EN: Centered for DMD / FR: CentrÃ© pour DMD
+                            x = (canvasWidth - finalBoxWidth) / 2;
+                            y = (canvasHeight - finalBoxHeight) / 2;
+                            // EN: Micro-adjustment for visual vertical centering on DMD (often needs -1 or -2)
+                            // FR: Micro-ajustement pour le centrage vertical visuel sur DMD (nécessite souvent -1 ou -2)
+                            y -= 1; 
                         }
                         else
                         {
@@ -2416,29 +3412,73 @@ namespace RetroBatMarqueeManager.Application.Services
                             y = margin;
                         }
 
-                        // EN: Draw Background Box (Semi-transparent Gray) / FR: Dessiner fond (gris semi-transparent)
-                        using (var brush = new SolidBrush(Color.FromArgb(180, 40, 40, 40)))
+                        Color bgColor = Color.FromArgb(180, 40, 40, 40); // Default semi-transparent grey
+                        if (isDmd) bgColor = Color.FromArgb(255, 60, 60, 60);
+
+                        if (bgColor.A > 0)
                         {
-                            g.FillRectangle(brush, x, y, boxWidth, boxHeight);
+                            using (var brush = new SolidBrush(bgColor))
+                            {
+                                g.FillRectangle(brush, x, y, finalBoxWidth, finalBoxHeight);
+                            }
                         }
                             
-                        // EN: Draw Border / FR: Dessiner bordure
-                        using (var pen = new Pen(Color.FromArgb(200, 255, 215, 0), 1)) // Gold border
+                        // EN: Draw Border
+                        Color textColor = GetColorFromHex(overlay?.TextColor ?? "", Color.Gold);
+                        // EN: For MPV, we always draw a border (Gold/Silver)
+                        // FR: Pour MPV, on dessine toujours une bordure (Or/Argent)
+                        Color borderColor = (isHardcore ? Color.Gold : Color.Silver);
+                        // EN: REMOVED: Do not override border color with text color on DMD
+                        // FR: RETIRÉ : Ne pas écraser la couleur de bordure avec la couleur du texte sur DMD
+                        // if (isDmd) borderColor = Color.FromArgb(200, textColor.R, textColor.G, textColor.B);
+
+                        using (var pen = new Pen(borderColor, isDmd ? 1 : 2))
                         {
-                            g.DrawRectangle(pen, x, y, boxWidth, boxHeight);
+                            g.DrawRectangle(pen, x, y, finalBoxWidth, finalBoxHeight);
                         }
 
-                        // EN: Draw Text (White) / FR: Dessiner texte (blanc)
-                        using (var brush = new SolidBrush(Color.White))
+                        // EN: Draw Text
+                        using (var brush = new SolidBrush(textColor))
                         {
-                            float textX = x + paddingX;
-                            float textY = y + paddingY;
+                            // Use full rectangle for centering
+                            var rectF = new RectangleF(x, y, finalBoxWidth, finalBoxHeight);
+                            var format = new StringFormat 
+                            { 
+                                Alignment = StringAlignment.Center, 
+                                LineAlignment = StringAlignment.Center,
+                                FormatFlags = StringFormatFlags.NoWrap
+                            };
                             
-                            // EN: Nudge text down slightly for visual centering (compensate for ascenders/descenders)
-                            // FR: Décaler légèrement le texte vers le bas pour le centrage visuel
-                            float verticalNudge = isDmd ? 1.0f : 3.0f;
+                            // EN: Draw Split Text (HC in Red, Count in Gold)
+                            // FR: Dessiner texte séparé (HC en Rouge, Compte en Or)
+                            float totalContentWidth = textSizeFinal.Width + hcSizeFinal.Width;
+                            float startX = x + (finalBoxWidth - totalContentWidth) / 2;
                             
-                            g.DrawString(text, font, brush, textX, textY + verticalNudge);
+                            // Vertical centering base
+                            float centerY = y + (finalBoxHeight - Math.Max(textSizeFinal.Height, hcSizeFinal.Height)) / 2;
+                            if (isDmd) centerY += 1; // EN: Adjusted up by 1px from previous +2 (Total +1 from center) / FR: Remonté de 1px
+
+                            if (isHardcore)
+                            {
+                                using (var hcBrush = new SolidBrush(Color.Red))
+                                {
+                                    // Manually draw HC
+                                    // Use generic format without alignment since we calculate X/Y manually for split parts
+                                    g.DrawString("HC ", effectiveFont, hcBrush, startX, centerY);
+                                }
+                                startX += hcSizeFinal.Width;
+                            }
+                            
+                            g.DrawString(text, effectiveFont, brush, startX, centerY);
+                                                        
+                            // DrawStringWithOutline(g, text, font, brush, rectF, format, isDmd); // Replaced by manual split drawing
+                        }
+
+                        // EN: Dispose effectiveFont if it was a new instance (created by auto-fit loop)
+                        // FR: Disposer effectiveFont si c'est une nouvelle instance (créée par la boucle auto-fit)
+                        if (effectiveFont != null && effectiveFont != font)
+                        {
+                            effectiveFont.Dispose();
                         }
                     }
 
@@ -2458,6 +3498,87 @@ namespace RetroBatMarqueeManager.Application.Services
             }
         }
 
+        /// <summary>
+        /// EN: Helper to draw a badge with a frame (Gold for Hardcore)
+        /// FR: Assistant pour dessiner un badge avec un cadre (DorÃ© pour Hardcore)
+        /// </summary>
+        private void DrawBadgeWithFrame(Graphics g, string badgePath, int x, int y, int size, bool isHardcore, bool isDmd)
+        {
+            try
+            {
+                using (var badgeImg = LoadBitmapWithSvgSupport(badgePath))
+                {
+                    if (badgeImg == null) return;
+
+                    // EN: Fix for DMD Transparency: Replace Black pixels with Dark Gray to prevent transparency holes
+                    // FR: Correctif Transparence DMD : Remplacer les pixels noirs par du Gris Foncé pour éviter les trous
+                    if (isDmd)
+                    {
+                        // Clone to avoid locking issues if source is locked, though LoadBitmap usually returns copy
+                        // We need to iterate pixels. For performance on small badges, simple Get/SetPixel is okay.
+                        // For larger ones, LockBits is better, but DMD badges are tiny (32x32 max usually).
+                        if (badgeImg.Width <= 64 && badgeImg.Height <= 64)
+                        {
+                             for (int py = 0; py < badgeImg.Height; py++)
+                             {
+                                 for (int px = 0; px < badgeImg.Width; px++)
+                                 {
+                                     Color pixel = badgeImg.GetPixel(px, py);
+                                     // Check for opaque pure black
+                                     if (pixel.A > 240 && pixel.R == 0 && pixel.G == 0 && pixel.B == 0)
+                                     {
+                                         badgeImg.SetPixel(px, py, Color.FromArgb(255, 60, 60, 60));
+                                     }
+                                 }
+                             }
+                        }
+                    }
+
+                    // EN: Draw badge / FR: Dessiner le badge
+                    g.DrawImage(badgeImg, x, y, size, size);
+
+                    if (isHardcore)
+                    {
+                        // EN: Draw Golden Frame / FR: Dessiner cadre doré
+                        // EN: Use 1px for DMD (small sizes), 2px for MPV / FR: Utiliser 1px pour DMD (petites tailles), 2px pour MPV
+                        float penWidth = size <= 32 ? 1f : 2f;
+                        using (var penGold = new Pen(Color.Gold, penWidth))
+                        {
+                            // EN: Adjust to stay inside bounds / FR: Ajuster pour rester dans les limites
+                            int rectW = size - 1;
+                            int rectH = size - 1;
+
+                            // EN: Ensure we don't draw outside the visible area (bottom edge)
+                            // FR: S'assurer de ne pas dessiner en dehors de la zone visible (bord inférieur)
+                            int maxY = (int)g.VisibleClipBounds.Height - 1;
+                            if (y + rectH > maxY) rectH = maxY - y;
+
+                            g.DrawRectangle(penGold, x, y, rectW, rectH);
+                            
+                            // EN: Add inner glow/bevel effect / FR: Ajouter effet de relief/lueur interne
+                            if (size > 32)
+                            {
+                                using (var penInner = new Pen(Color.FromArgb(180, Color.LightYellow), 1))
+                                {
+                                    // EN: Reduce rect size to stay inside the gold frame and visible area
+                                    // FR: Réduire la taille du rect pour rester à l'intérieur du cadre doré et de la zone visible
+                                    int innerW = size - 3;
+                                    int innerH = size - 3;
+                                    if (y + 1 + innerH > maxY) innerH = maxY - (y + 1);
+
+                                    g.DrawRectangle(penInner, x + 1, y + 1, innerW, innerH);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] Error DrawBadgeWithFrame: {ex.Message}");
+            }
+        }
+
         private string Sanitize(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
@@ -2470,14 +3591,1694 @@ namespace RetroBatMarqueeManager.Application.Services
 
             // 2. EN: Replace spaces and common delimiters that might cause issues with DMD drivers/CLI
             // FR: Remplacer les espaces et délimiteurs communs qui pourraient causer des soucis avec drivers DMD/CLI
-            char[] delimiters = { ' ', '(', ')', '[', ']', '-', '.', ',' };
+            // EN: Also replace apostrophes which cause issues with MPV filter graph escaping
+            // FR: Remplacer aussi les apostrophes qui causent des soucis avec l'échappement filter graph MPV
+            char[] delimiters = { ' ', '(', ')', '[', ']', '-', '.', ',', '\'' };
             foreach (var c in delimiters) result = result.Replace(c, '_');
 
             // 3. EN: Collapse multiple underscores into one
-            // FR: Réduire les underscores multiples en un seul
+            // FR: RÃ©duire les underscores multiples en un seul
             while (result.Contains("__")) result = result.Replace("__", "_");
 
             return result.Trim('_').Trim();
         }
+        /// <summary>
+        /// EN: Purge all files in the hc_overlays directory
+        /// FR: Purger tous les fichiers du dossier hc_overlays
+        /// </summary>
+        public void PurgeHardcoreOverlays()
+        {
+            try
+            {
+                // EN: Purge from cache folder instead of hardcoded path
+                // FR: Purger depuis le dossier cache au lieu du chemin codÃ© en dur
+                string overlayFolder = Path.Combine(_config.CachePath, "hc_overlays");
+                if (Directory.Exists(overlayFolder))
+                {
+                    var files = Directory.GetFiles(overlayFolder, "*.png");
+                    foreach (var file in files)
+                    {
+                        try { File.Delete(file); } catch { }
+                    }
+                    _logger.LogInformation($"[ImageConversion] Purged {files.Length} files from hc_overlays");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] Error purging hc_overlays: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// EN: Purge all files in the overlays directory (Softcore)
+        /// FR: Purger tous les fichiers du dossier overlays (Softcore)
+        /// </summary>
+        public void PurgeSoftcoreOverlays()
+        {
+            try
+            {
+                // EN: Purge from cache folder (Softcore)
+                // FR: Purger depuis le dossier cache (Softcore)
+                string overlayFolder = Path.Combine(_config.CachePath, "overlays");
+                if (Directory.Exists(overlayFolder))
+                {
+                    var files = Directory.GetFiles(overlayFolder, "*.png");
+                    foreach (var file in files)
+                    {
+                        try { File.Delete(file); } catch { }
+                    }
+                    _logger.LogInformation($"[ImageConversion] Purged {files.Length} files from overlays (Softcore)");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] Error purging overlays: {ex.Message}");
+            }
+        }
+        /// <summary>
+        /// EN: Generate an overlay image for Rich Presence text (Emoji aware if possible)
+        /// FR: GÃ©nÃ©rer une image d'overlay pour le texte Rich Presence (conscient des Emojis si possible)
+        /// </summary>
+        public async Task<string> GenerateRichPresenceOverlay(string text, bool isHardcore, int width = 1920, int height = 360, string? backgroundPath = null, string position = "center", bool forceRegenerate = false, CancellationToken token = default)
+        {
+            try
+            {
+                text = CleanRichPresenceString(text, false); // Keep emojis for MPV image generation
+
+                if (string.IsNullOrWhiteSpace(text)) return string.Empty; // Nothing to show
+
+                // Cache dir
+                string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
+                string cacheDir = Path.Combine(_config.CachePath, overlayFolder);
+                if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
+
+                // Unique filename logic
+                string safeText = Sanitize(text);
+                if (safeText.Length > 20) safeText = safeText.Substring(0, 20);
+                
+                // Include position and background hash in filename to differentiate
+                int bgHash = backgroundPath?.GetHashCode() ?? 0;
+                string filename = $"rp_{position}_{safeText}_{DateTime.Now.Ticks}_{bgHash}.png"; 
+                string targetPath = Path.Combine(cacheDir, filename);
+
+                using (var bitmap = new Bitmap(width, height))
+                {
+                    using (var g = Graphics.FromImage(bitmap))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+
+                        // 1. Draw Background (for DMD composition) or Clear (for MPV overlay)
+                        if (!string.IsNullOrEmpty(backgroundPath) && File.Exists(backgroundPath))
+                        {
+                            try
+                            {
+                                using (var bgImg = Image.FromFile(backgroundPath))
+                                {
+                                    g.DrawImage(bgImg, 0, 0, width, height); // Stretch to fit
+                                }
+                            }
+                            catch
+                            {
+                                g.Clear(Color.Black); // Fallback
+                            }
+                        }
+                        else
+                        {
+                            g.Clear(Color.Transparent);
+                        }
+
+                        // Font Setup
+                        string fontFamily = "Segoe UI Emoji";
+                        if (!IsFontInstalled(fontFamily)) fontFamily = "Arial"; // Fallback
+
+                        // Colors
+                        Color textColor = isHardcore ? Color.Gold : Color.White;
+
+                        // 2. Calculate Positioning
+                        var overlay = GetOverlayItem("rp_narration", width < 300);
+                        float boxW, boxH, boxX, boxY;
+
+                        if (overlay != null)
+                        {
+                            if (!overlay.IsEnabled) return string.Empty;
+                            boxX = overlay.X;
+                            boxY = overlay.Y;
+                            boxW = overlay.Width;
+                            boxH = overlay.Height;
+
+                            // EN: Override text color if specified in overlay
+                            if (!string.IsNullOrEmpty(overlay.TextColor))
+                            {
+                                textColor = GetColorFromHex(overlay.TextColor, textColor);
+                            }
+                        }
+                        else
+                        {
+                            // Static Fallback
+                            boxW = width * 0.5f;
+                            boxH = height * 0.3f;
+                            boxX = (width - boxW) / 2;
+                            boxY = (height - boxH) / 2;
+                        }
+
+                        // EN: Determine Font Size (Config > Dynamic)
+                        // FR: Déterminer la taille de police (Config > Dynamique)
+                        float fontSize = 0f;
+                        if (overlay != null && overlay.FontSize > 0)
+                        {
+                            fontSize = overlay.FontSize;
+                        }
+                        else
+                        {
+                             // Dynamic Fallback
+                             fontSize = Math.Max(10, (int)(boxH * 0.35));
+                             if (width < 300) fontSize = Math.Max(7, (int)(boxH * 0.5));
+                        }
+
+                        string raFontFamily = _config.RAFontFamily;
+                        // Default fallback if empty
+                        if (string.IsNullOrEmpty(raFontFamily)) raFontFamily = "Arial";
+
+                        // Emoji detection override
+                        bool containsEmoji = System.Text.RegularExpressions.Regex.IsMatch(text, @"\p{Cs}|[\u2000-\u3300]");
+                        if (containsEmoji && IsFontInstalled("Segoe UI Emoji"))
+                        {
+                            raFontFamily = "Segoe UI Emoji";
+                        }
+
+                        if (!IsFontInstalled(raFontFamily)) raFontFamily = "Arial";
+
+                        using (var font = new Font(raFontFamily, fontSize, FontStyle.Bold))
+                        {
+                            // Measure Text within the Box
+                            var format = new StringFormat
+                            {
+                                Alignment = StringAlignment.Center,
+                                LineAlignment = StringAlignment.Center,
+                                Trimming = StringTrimming.None, // EN: No dots requested by user / FR: Pas de points demandés par l'utilisateur
+                                FormatFlags = StringFormatFlags.NoWrap
+                            };
+                            
+                            // Measure unbounded check for scrolling
+                            var trueSize = g.MeasureString(text, font, new PointF(0, 0), StringFormat.GenericTypographic);
+                            
+                            // 3. Draw Background Box
+                            Color bgColor = Color.Transparent; // EN: Transparent background as requested / FR: Fond transparent comme demandé
+
+                            // EN: Check overflow and generate GIF if needed
+                            // FR: Vérifier le dépassement et générer un GIF si nécessaire
+                            _logger.LogInformation($"[RP Debug] Text '{text}' Width: {trueSize.Width} vs BoxW: {boxW - 20}");
+                            
+                            if (trueSize.Width > boxW - 20)
+                            {
+                                string gifPath = await GenerateFullscreenScrollingGif(text, font, width, height, new RectangleF(boxX, boxY, boxW, boxH), backgroundPath, bgColor, textColor, isHardcore, token);
+                                _logger.LogInformation($"[RP Debug] GIF Path: {gifPath}");
+                                if (!string.IsNullOrEmpty(gifPath)) return gifPath;
+                            }
+
+                            var textSize = g.MeasureString(text, font, new SizeF(boxW - 20, boxH - 10), format);
+                            
+                            if (bgColor.A > 0)
+                            {
+                                using (var boxBrush = new SolidBrush(bgColor))
+                                {
+                                    g.FillRectangle(boxBrush, boxX, boxY, boxW, boxH); 
+                                }
+                            }
+
+                            // 4. Draw Text centered in Box
+                            RectangleF centeredRect = new RectangleF(boxX, boxY, boxW, boxH);
+
+                            // Shadow
+                            using (var shadowBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+                            {
+                                RectangleF shadowRect = centeredRect;
+                                shadowRect.Offset(2, 2);
+                                g.DrawString(text, font, shadowBrush, shadowRect, format);
+                            }
+
+                            using (var textBrush = new SolidBrush(textColor))
+                            {
+                                g.DrawString(text, font, textBrush, centeredRect, format);
+                            }
+                        }
+                    }
+                    bitmap.Save(targetPath, ImageFormat.Png);
+                }
+
+                // Cleanup periodically
+                if (DateTime.Now.Second % 30 == 0)
+                {
+                     _ = Task.Run(() => CleanupOldOverlays(cacheDir));
+                }
+
+                return targetPath;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] Failed to generate RP overlay: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+
+        /// <summary>
+        /// EN: Generate a composite achievement overlay for DMD (Badge + Title + Points) similar to MPV layout
+        /// FR: Générer un overlay de succès composite pour DMD (Badge + Titre + Points) similaire au layout MPV
+        /// </summary>
+        public string GenerateDmdAchievementOverlay(string badgePath, string title, string description, int points, bool isHardcore)
+        {
+            try
+            {
+                int width = _config.DmdWidth > 0 ? _config.DmdWidth : 128;
+                int height = _config.DmdHeight > 0 ? _config.DmdHeight : 32;
+
+                string folder = isHardcore ? "hc_overlays" : "overlays";
+                string outputFolder = Path.Combine(_config.CachePath, folder);
+                Directory.CreateDirectory(outputFolder);
+
+                string safeTitle = Sanitize(title);
+                string filename = $"dmd_ach_{safeTitle}_{DateTime.Now.Ticks}.png";
+                string outputPath = Path.Combine(outputFolder, filename);
+
+                var overlay = GetOverlayItem("unlock", true);
+                if (overlay != null && !overlay.IsEnabled) return string.Empty;
+
+                // EN: Check for overflow and generate GIF if needed
+                // FR: Vérifier le débordement et générer un GIF si nécessaire
+                try
+                {
+                    using (var bmpCheck = new Bitmap(1, 1))
+                    using (var grCheck = Graphics.FromImage(bmpCheck))
+                    {
+                        PrivateFontCollection? pfcCheck = null;
+                        FontFamily? famCheck = null;
+                        try
+                        {
+                            string fontName = _config.RAFontFamily;
+                            if (string.IsNullOrEmpty(fontName)) fontName = "Arial";
+                            if (System.Text.RegularExpressions.Regex.IsMatch(title, @"\p{Cs}|[\u2000-\u3300]") && IsFontInstalled("Segoe UI Emoji"))
+                                fontName = "Segoe UI Emoji";
+
+                            famCheck = GetFontFamilySafe(fontName, out pfcCheck);
+                            
+                            int hCheck = height > 0 ? height : 32;
+                            int titleSizeCheck = hCheck < 64 ? 7 : 10;
+                            using (var fCheck = new Font(famCheck, titleSizeCheck, FontStyle.Bold))
+                            {
+                                int bSize = hCheck - 4;
+                                int tX = 2 + bSize + 4;
+                                int tW = width - tX - 2;
+                                
+                                if (grCheck.MeasureString(title, fCheck).Width > tW)
+                                {
+                                    string gif = GenerateDmdScrollingAchievementGif(badgePath, title, description, points, isHardcore, width, height);
+                                    if (!string.IsNullOrEmpty(gif) && File.Exists(gif))
+                                    {
+                                        _logger.LogInformation($"[RA DMD] Title overflow detected. Returning scrolling GIF: {gif}");
+                                        return gif;
+                                    }
+                                }
+                            }
+                        }
+                        finally 
+                        {
+                            if(pfcCheck!=null) pfcCheck.Dispose();
+                            else famCheck?.Dispose();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                     _logger.LogWarning($"[RA DMD] Error checking text overflow: {ex.Message}");
+                }
+
+                using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    // Setup Quality
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.SmoothingMode = SmoothingMode.AntiAlias; // Use AntiAlias for shapes/lines even on DMD for cleaner look downscaled
+                    g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit; // Pixel perfect text for low res
+
+                    // 1. Background (Dark Gray)
+                    g.Clear(Color.FromArgb(255, 40, 40, 40));
+
+                    // 2. Draw Border
+                    Color borderColor = isHardcore ? Color.Gold : Color.Silver;
+                    using (var pen = new Pen(borderColor, 1))
+                    {
+                        g.DrawRectangle(pen, 0, 0, width - 1, height - 1);
+                    }
+
+                    // 3. Draw Badge (Left Side)
+                    // margin 2px
+                    int badgeSize = height - 4; // 28px on 32h
+                    int badgeX = 2;
+                    int badgeY = 2;
+
+                    DrawBadgeWithFrame(g, badgePath, badgeX, badgeY, badgeSize, isHardcore, true);
+
+                    // 4. Draw Text (Right Side)
+                    int textX = badgeX + badgeSize + 4;
+                    int textW = width - textX - 2;
+
+                    // Fonts
+                    // Title: Bold, slightly larger
+                    // Points: Regular/Bold, smaller, yellow/gold
+                    
+                    int titleSize = height < 64 ? 7 : 10;
+                    int pointsSize = height < 64 ? 6 : 9;
+
+                    var fontNameOrPath = _config.RAFontFamily;
+                    // Emoji detection for DMD Title
+                    bool containsEmoji = System.Text.RegularExpressions.Regex.IsMatch(title, @"\p{Cs}|[\u2000-\u3300]");
+                    if (containsEmoji && IsFontInstalled("Segoe UI Emoji"))
+                    {
+                        fontNameOrPath = "Segoe UI Emoji";
+                    }
+
+                    if (string.IsNullOrEmpty(fontNameOrPath)) fontNameOrPath = "Arial";
+                    
+                    PrivateFontCollection? pfc = null;
+                    FontFamily? family = null;
+
+                    try
+                    {
+                        family = GetFontFamilySafe(fontNameOrPath, out pfc);
+                        
+                        using (var titleFont = new Font(family, titleSize, FontStyle.Bold))
+                        using (var pointsFont = new Font(family, pointsSize, FontStyle.Regular))
+                        using (var titleBrush = new SolidBrush(borderColor)) // Use border color (Silver/Gold) for Title
+                        using (var pointsBrush = new SolidBrush(Color.Gold)) // Always Gold for points
+                        {
+                            var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+                            
+                            // Title Rect (Top half)
+                            RectangleF titleRect = new RectangleF(textX, 2, textW, height / 2);
+                            
+                            // Points Rect (Bottom half)
+                            RectangleF pointsRect = new RectangleF(textX, height / 2 + 1, textW, height / 2);
+
+                            g.DrawString(title, titleFont, titleBrush, titleRect, format);
+                            g.DrawString($"{points} pts", pointsFont, pointsBrush, pointsRect, format);
+                        }
+                    }
+                    finally
+                    {
+                        if (pfc != null) pfc.Dispose();
+                        else family?.Dispose();
+                    }
+                    
+                    bitmap.Save(outputPath, ImageFormat.Png);
+                }
+
+                if (!string.IsNullOrEmpty(outputPath) && File.Exists(outputPath))
+                {
+                    _logger.LogInformation($"[RA DMD] Generated achievement overlay: {outputPath}");
+                    return outputPath;
+                }
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[RA DMD] Error generating achievement overlay: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// EN: Generate a scrolling GIF for DMD achievement with long title
+        /// FR: Générer un GIF défilant pour succès DMD avec titre long
+        /// </summary>
+        private string GenerateDmdScrollingAchievementGif(string badgePath, string title, string description, int points, bool isHardcore, int width, int height)
+        {
+            try
+            {
+                // Cache check
+                string safeTitle = Sanitize(title);
+                string folder = isHardcore ? "hc_overlays" : "overlays";
+                string outputFolder = Path.Combine(_config.CachePath, folder);
+                Directory.CreateDirectory(outputFolder);
+                string gifFilename = $"dmd_ach_scroll_{safeTitle}_{DateTime.Now.Ticks}.gif";
+                string gifPath = Path.Combine(outputFolder, gifFilename);
+
+                // Setup Base Layout (Static)
+                using (var baseBmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(baseBmp))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+
+                    // 1. Background
+                    g.Clear(Color.FromArgb(255, 40, 40, 40));
+
+                    // 2. Border
+                    Color borderColor = isHardcore ? Color.Gold : Color.Silver;
+                    using (var pen = new Pen(borderColor, 1))
+                    {
+                        g.DrawRectangle(pen, 0, 0, width - 1, height - 1);
+                    }
+
+                    // 3. Badge
+                    int badgeSize = height - 4;
+                    int badgeX = 2;
+                    int badgeY = 2;
+                    DrawBadgeWithFrame(g, badgePath, badgeX, badgeY, badgeSize, isHardcore, true);
+
+                    // 4. Points (Static)
+                    int textX = badgeX + badgeSize + 4;
+                    int textW = width - textX - 2;
+                    int pointsSize = height < 64 ? 6 : 9;
+                    
+                    var fontNameOrPath = _config.RAFontFamily;
+                    if (string.IsNullOrEmpty(fontNameOrPath)) fontNameOrPath = "Arial";
+                    if (IsFontInstalled("Segoe UI Emoji")) fontNameOrPath = "Segoe UI Emoji"; // Safer
+
+                    PrivateFontCollection? pfc = null;
+                    FontFamily? family = GetFontFamilySafe(fontNameOrPath, out pfc);
+                    
+                    try
+                    {
+                        using (var pointsFont = new Font(family, pointsSize, FontStyle.Regular))
+                        using (var pointsBrush = new SolidBrush(Color.Gold))
+                        {
+                            var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near, FormatFlags = StringFormatFlags.NoWrap };
+                            RectangleF pointsRect = new RectangleF(textX, height / 2 + 1, textW, height / 2);
+                            g.DrawString($"{points} pts", pointsFont, pointsBrush, pointsRect, format);
+                        }
+
+                        // 5. Calculate Title Scrolling
+                        int titleSize = height < 64 ? 7 : 10;
+                         using (var titleFont = new Font(family, titleSize, FontStyle.Bold))
+                         using (var titleBrush = new SolidBrush(borderColor))
+                         {
+                             // Measure Title
+                             var textSize = g.MeasureString(title, titleFont);
+                             float titleW = textSize.Width;
+                             
+                             // SCROLL GENERATION (FFmpeg)
+                             string ffmpegPath = FindFfmpeg();
+                             if (string.IsNullOrEmpty(ffmpegPath)) return string.Empty;
+
+                             var startInfo = new ProcessStartInfo
+                             {
+                                FileName = ffmpegPath,
+                                Arguments = $"-y -f image2pipe -framerate 30 -i - -filter_complex \"[0:v] split [a][b];[a] palettegen=reserve_transparent=0 [p];[b][p] paletteuse\" -loop 0 \"{gifPath}\"",
+                                RedirectStandardInput = true,
+                                UseShellExecute = false,
+                                CreateNoWindow = true,
+                                RedirectStandardOutput = true,
+                                RedirectStandardError = true
+                             };
+
+                             var proc = Process.Start(startInfo);
+                             if (proc == null) return string.Empty;
+                             
+                             RectangleF titleRect = new RectangleF(textX, 2, textW, height / 2);
+                             int speed = 2; // Slower for DMD
+                             int totalFrames = (int)((textW + titleW) / speed) + 20;
+                             if (totalFrames > 300) { speed = 4; totalFrames = (int)((textW + titleW) / speed) + 20; }
+
+                             using (var stdin = proc.StandardInput.BaseStream)
+                             using (var frameBmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                             using (var gf = Graphics.FromImage(frameBmp))
+                             {
+                                 gf.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                                 gf.SmoothingMode = SmoothingMode.AntiAlias;
+                                 gf.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+                                 
+                                 var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near, FormatFlags = StringFormatFlags.NoWrap };
+
+                                 for(int i=0; i<totalFrames; i++)
+                                 {
+                                     // Draw Base
+                                     gf.DrawImage(baseBmp, 0, 0);
+                                     
+                                     // Clip to Title Area
+                                     gf.SetClip(titleRect);
+                                     
+                                     float currentX = (titleRect.Right - 5) - (i * speed);
+                                     
+                                     // Draw Title
+                                     // Shadow for legibility
+                                     using(var shadowBrush = new SolidBrush(Color.Black))
+                                     {
+                                         gf.DrawString(title, titleFont, shadowBrush, currentX + 1, titleRect.Y + 1, format);
+                                     }
+                                     gf.DrawString(title, titleFont, titleBrush, currentX, titleRect.Y, format);
+                                     
+                                     gf.ResetClip();
+                                     
+                                     frameBmp.Save(stdin, ImageFormat.Png);
+                                 }
+                             }
+                             
+                             proc.WaitForExit(15000);
+                             if (proc.ExitCode == 0 && File.Exists(gifPath)) return gifPath;
+                         }
+                    }
+                    finally
+                    {
+                        if (pfc != null) pfc.Dispose();
+                        else family?.Dispose();
+                    }
+                }
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[RA DMD] Error generating scrolling achievement GIF: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+
+        public string CleanRichPresenceString(string text, bool stripEmojis)
+        {
+             if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+             
+             // 1. Filter out zero-value segments (e.g. "Gems x0", "Lives: 0")
+             // EN: Split by | or , / FR: DÃ©couper par | ou ,
+             var parts = text.Split(new[] { '|', ',' }, StringSplitOptions.RemoveEmptyEntries);
+             var filteredParts = parts.Where(p => 
+             {
+                 var trim = p.Trim();
+                 // Return false if matches "0" value pattern / FR: Retourne faux si correspond au pattern de valeur "0"
+                 return !System.Text.RegularExpressions.Regex.IsMatch(trim, @"(?:\s*[:x]\s*)0\s*$");
+             });
+             
+             var result = string.Join(", ", filteredParts.Select(p => p.Trim()));
+
+             // 2. Strip standard emoji chars if requested (for DMD)
+             if (stripEmojis)
+             {
+                 // Remove anything above U+FFFF (Surrogates which include most emojis)
+                 result = System.Text.RegularExpressions.Regex.Replace(result, @"[^\u0000-\uFFFF]", "");
+             }
+
+             return result;
+        }
+
+        /// <summary>
+        /// EN: Generate a styled overlay for an individual Rich Presence item (Key: Value)
+        /// FR: GÃ©nÃ©rer un overlay stylisÃ© pour un Ã©lÃ©ment individuel de Rich Presence (Clef: Valeur)
+        /// </summary>
+        public string GenerateRichPresenceItemOverlay(string key, string value, bool isHardcore, int canvasWidth, int canvasHeight, bool isDmd = false, bool isScore = false, string alignment = "top-left", int yOffset = 0, bool forceRegenerate = false, CancellationToken token = default)
+        {
+            PrivateFontCollection? pfc = null;
+            FontFamily? family = null;
+
+            try
+            {
+                string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
+                string outputFolder = Path.Combine(_config.CachePath, overlayFolder);
+                Directory.CreateDirectory(outputFolder);
+
+                string safeKey = Sanitize(key);
+                string suffix = isDmd ? "dmd" : "mpv";
+                string fileName = $"rp_item_{safeKey}_{suffix}_{DateTime.Now.Ticks}.png";
+                string outputPath = Path.Combine(outputFolder, fileName);
+
+                using (var bitmap = new Bitmap(canvasWidth, canvasHeight, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.Transparent);
+                    
+                    // 1. Determine Layout Type Early
+                    string layoutType = isScore ? "rp_score" : "stat";
+                    if (!isScore)
+                    {
+                        string lowerKey = key.ToLowerInvariant();
+                        if (lowerKey.Contains("live") || lowerKey.Contains("♥") || lowerKey.Contains("vies")) layoutType = "rp_lives";
+                        else if (lowerKey.Contains("score") || lowerKey.Contains("💵")) layoutType = "rp_score";
+                        else if (lowerKey.Contains("narrat")) layoutType = "rp_narration";
+                        else if (lowerKey.Contains("weapon") || lowerKey.Contains("arme") || lowerKey.Contains("🔫")) layoutType = "rp_weapon";
+                        else if (lowerKey.Contains("lap") || lowerKey.Contains("tour")) layoutType = "rp_lap";
+                        else if (lowerKey.Contains("rank") || lowerKey.Contains("pos")) layoutType = "rp_rank";
+                        else layoutType = "rp_stat";
+                    }
+
+                    // EN: Content formatting / FR: Formatage du contenu
+                    // EN: Use value only for stats/weapons, add heart for lives
+                    // FR: Utiliser la valeur seule pour stats/armes, ajouter un coeur pour les vies
+                    string text = value;
+                    if (layoutType == "rp_lives" && !value.Contains("♥")) text = $"{value}♥";
+                    else if (layoutType == "rp_stat")
+                    {
+                        // EN: Check for Emoji in key
+                        if (System.Text.RegularExpressions.Regex.IsMatch(key, @"\p{Cs}|[\u2000-\u3300]"))
+                        {
+                            text = $"{key} {value}"; 
+                        }
+                        else
+                        {
+                            text = value; // Text keys too long, show only value
+                        }
+                    }
+                    else if (layoutType == "rp_score" || layoutType == "rp_narration" || layoutType == "rp_weapon" || layoutType == "rp_lap" || layoutType == "rp_rank") text = value;
+                    else if (!isScore) text = $"{key}: {value}"; // Fallback for other items
+
+                    var overlay = GetOverlayItem(layoutType, isDmd);
+                    if (overlay != null && !overlay.IsEnabled) return string.Empty;
+                    _logger.LogInformation($"[RP Item] Generating '{key}' (Type: {layoutType}) - Overlay found: {overlay != null}");
+
+                    // 2. Select Font (Scaled if Overlay exists, Default if not)
+                    Font? font = null;
+                    int defaultFontSize = isDmd ? (canvasHeight < 64 ? 7 : 10) : Math.Max(10, canvasHeight / 24);
+                    var fontStyle = FontStyle.Bold;
+                    
+                    // Resolve Font Family safely
+                    string fontNameOrPath = _config.RAFontFamily;
+                    bool containsEmoji = System.Text.RegularExpressions.Regex.IsMatch(text, @"\p{Cs}|[\u2000-\u3300]");
+                    if (containsEmoji && IsFontInstalled("Segoe UI Emoji"))
+                    {
+                        fontNameOrPath = "Segoe UI Emoji";
+                    }
+
+                    family = GetFontFamilySafe(fontNameOrPath, out pfc);
+
+                    if (overlay != null)
+                    {
+                         if (overlay.FontSize > 0)
+                         {
+                             font = new Font(family, overlay.FontSize, fontStyle);
+                         }
+                         else
+                         {
+                             // Auto-scale to fit overlay width
+                             int padding = isDmd ? 4 : 16;
+                             int maxF = isDmd ? (canvasHeight < 64 ? 8 : 12) : defaultFontSize + 6;
+                             int minF = isDmd ? 6 : 8;
+                             
+                             font = GetAdjustedFont(g, text, family, maxF, minF, overlay.Width - padding, overlay.Height - padding, fontStyle);
+                         }
+                    }
+                    else
+                    {
+                         font = new Font(family, defaultFontSize, fontStyle);
+                    }
+
+                    using (font)
+                    {
+                        g.TextRenderingHint = isDmd ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+                        var textSize = g.MeasureString(text, font);
+                        
+                        int paddingX = isDmd ? 2 : 8;
+                        int paddingY = isDmd ? 2 : 10;
+                        
+                        int boxWidth = (int)textSize.Width + (paddingX * 2);
+                        int boxHeight = (int)textSize.Height + (paddingY * 2);
+
+                        // LayoutType already calculated above
+                        // Overlay already retrieved above
+
+                        int x = 20, y = 20;
+                        int finalBoxWidth = boxWidth;
+                        int finalBoxHeight = boxHeight;
+
+                        if (overlay != null)
+                        {
+                            x = overlay.X;
+                            y = overlay.Y;
+                            // EN: Auto-expand frame if text is too large to avoid truncation (height and width)
+                            // FR: Agrandir automatiquement le cadre si le texte est trop grand pour éviter la troncature
+                            finalBoxWidth = Math.Max(overlay.Width, boxWidth);
+                            finalBoxHeight = Math.Max(overlay.Height, boxHeight);
+                        }
+                        else
+                        {
+                            // EN: Orchestrate alignment / FR: Orchestrer l'alignement
+                            int margin = isDmd ? 2 : 20;
+
+                            switch (alignment.ToLowerInvariant())
+                            {
+                                case "top-right":
+                                    x = canvasWidth - boxWidth - margin;
+                                    y = margin + yOffset;
+                                    break;
+                                case "top-left":
+                                    x = margin;
+                                    y = margin + yOffset;
+                                    break;
+                                case "bottom-right":
+                                    x = canvasWidth - boxWidth - margin;
+                                    y = canvasHeight - boxHeight - margin - yOffset;
+                                    // EN: If not DMD, move up to avoid badges / FR: Si pas DMD, monter pour Ã©viter badges
+                                    if (!isDmd)
+                                    {
+                                        float badgeAreaHeight = canvasHeight / 7.2f;
+                                        y -= (int)badgeAreaHeight;
+                                    }
+                                    break;
+                                case "bottom-left":
+                                    x = margin;
+                                    y = canvasHeight - boxHeight - margin - yOffset;
+                                    if (!isDmd)
+                                    {
+                                        float badgeAreaHeight = canvasHeight / 7.2f;
+                                        y -= (int)badgeAreaHeight;
+                                    }
+                                    break;
+                                case "center":
+                                    x = (canvasWidth - boxWidth) / 2;
+                                    y = (canvasHeight - boxHeight) / 2 + yOffset;
+                                    break;
+                            }
+                        }
+
+                        // EN: Draw Background
+                        Color bgColor = Color.FromArgb(180, 40, 40, 40); // Default semi-transparent grey
+                        if (layoutType.Contains("narration")) bgColor = Color.FromArgb(180, 40, 40, 40); // Force gray for narration
+                        using (var brushBg = new SolidBrush(bgColor))
+                        {
+                            g.FillRectangle(brushBg, x, y, finalBoxWidth, finalBoxHeight);
+                        }
+
+                        Color textColor = GetColorFromHex(overlay?.TextColor ?? "", Color.Gold);
+                        _logger.LogInformation($"[RP Item] '{key}' Color: {textColor} (Config: {overlay?.TextColor})");
+                        // EN: For MPV, we always draw a border (Gold/Silver)
+                        // FR: Pour MPV, on dessine toujours une bordure (Or/Argent)
+                        Color borderColor = (isHardcore ? Color.Gold : Color.Silver);
+                        // EN: REMOVED: Do not override border color with text color on DMD
+                        // FR: RETIRÉ : Ne pas écraser la couleur de bordure avec la couleur du texte sur DMD
+                        // if (isDmd) borderColor = Color.FromArgb(200, textColor.R, textColor.G, textColor.B);
+
+                        using (var pen = new Pen(borderColor, isDmd ? 1 : 2))
+                        {
+                            g.DrawRectangle(pen, x, y, finalBoxWidth, finalBoxHeight);
+                        }
+
+                        // EN: Draw Text / FR: Dessiner le Texte
+                        using (var brush = new SolidBrush(textColor))
+                        {
+                            // EN: Always Center text in box for RP items
+                            // FR: Toujours centrer le texte dans la boite pour les items RP
+                             var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                             
+                             // EN: Check if text fits (Measure without constraint to get real width)
+                             // FR: Vérifier si le texte tient (Mesurer sans contrainte pour avoir la largeur réelle)
+                             var textSizeForGif = g.MeasureString(text, font, new PointF(0, 0), StringFormat.GenericTypographic);
+                             bool textFits = textSizeForGif.Width <= finalBoxWidth - 10;
+                             
+                             // EN: If MPV (Not DMD) and Narration (relaxed check) and Text doesn't fit -> Generate Scrolling GIF
+                             // FR: Si MPV (Pas DMD) et Narration (vérif souple) et Texte ne tient pas -> Générer GIF défilant
+                             if (!isDmd && layoutType.Contains("narration") && !textFits)
+                             {
+                                 // Close existing bitmap context to release file lock potential (though we haven't saved yet)
+                                 // Actually we need to return a different file path.
+                                 // We can't easily abort this using block, but we can skip saving this bitmap and generate the GIF instead.
+                                 string gifPath = GenerateScrollingTextGif(text, font, finalBoxWidth, finalBoxHeight, bgColor, textColor, isHardcore, token);
+                                 if (!string.IsNullOrEmpty(gifPath))
+                                 {
+                                     return gifPath;
+                                 }
+                                 // EN: Verify log if failed / FR: Vérifier log si échoué
+                                 _logger.LogWarning($"[ImageConversion] Scrolling GIF generation failed for '{text}', using static fallback.");
+                             }
+                             
+                             Rectangle rect = new Rectangle(x, y, finalBoxWidth, finalBoxHeight);
+                             DrawStringWithOutline(g, text, font, brush, rect, format, isDmd);
+                        }
+
+                        bitmap.Save(outputPath, ImageFormat.Png);
+                    }
+                    return outputPath;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] Error generating RP individual item: {ex.Message}");
+                return string.Empty;
+            }
+            finally
+            {
+                if (pfc != null) pfc.Dispose();
+                else family?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// EN: Parse Rich Presence text into structured Narrative/Stats data
+        /// FR: DÃ©coder le texte Rich Presence en donnÃ©es structurÃ©es Narration/Stats
+        /// </summary>
+        public RichPresenceState ParseRichPresence(string rpText)
+        {
+            var state = new RichPresenceState { RawText = rpText };
+            if (string.IsNullOrWhiteSpace(rpText)) return state;
+
+            var statKeysToTarget = new[] { "lives", "score", "weapon", "arme", "ammo", "gems", "keys", "difficulty", "mode", "lap", "tour", "rank", "pos" };
+
+            // EN: Step 1 - Try to extract Key: Value pairs using a robust regex (Colon/x separated)
+            // FR: Étape 1 - Essayer d'extraire les paires Clef: Valeur via une regex robuste (séparé par deux-points/x)
+            // Refined to disallow "Dot Space" in keys (prevents "Overworld. Lives:0" -> Key="Overworld. Lives")
+            // Also disallow '-' in keys to prevent "Level 1-1 - Lives:3" -> Key="Level 1-1 - Lives"
+            var matches = System.Text.RegularExpressions.Regex.Matches(rpText, 
+                @"(?<key>(?:[^|:,\n.-]|\.(?!\s))+?)\s*[:x]\s*(?<value>.*?)(?=\s*(?:[|]|\u00B7|,\s*[^|:,\n]+?[:x]|$))", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            var matchedIndices = new List<(int, int)>();
+
+            // EN: Common robust emoji/surrogate regex patterns
+            // FR: Patterns regex robustes pour émojis/surrogates
+            // Matches any Surrogate Pair (High Surrogate D800-DBFF + Low Surrogate DC00-DFFF) or strictly high surrogates for detection
+            string surrogatePattern = @"[\uD800-\uDFFF]";
+            
+            // Map Emojis: Map, Round Pushpin, Triangular Flag, Earths, Castle, Cityscape, Compass
+            // 🗺️ \uD83D\uDDFA
+            // 📍 \uD83D\uDCCD
+            // 🚩 \uD83D\uDEA9
+            // 🌍 \uD83C\uDF0D
+            // 🌎 \uD83C\uDF0E
+            // 🌏 \uD83C\uDF0F
+            // 🏰 \uD83C\uDFF0
+            // 🏙️ \uD83C\uDFD9
+            // 🧭 \uD83E\uDDED
+            string mapEmojiPattern = @"\uD83D\uDDFA|\uD83D\uDCCD|\uD83D\uDEA9|\uD83C\uDF0D|\uD83C\uDF0E|\uD83C\uDF0F|\uD83C\uDFF0|\uD83C\uDFD9|\uD83E\uDDED";
+
+            foreach (System.Text.RegularExpressions.Match match in matches)
+            {
+                var key = match.Groups["key"].Value.Trim();
+                var val = match.Groups["value"].Value.Trim();
+                var lowKey = key.ToLowerInvariant();
+                
+                // EN: Detect Emoji Keys using Surrogate range (more reliable in .NET for string handling)
+                bool isEmojiKey = System.Text.RegularExpressions.Regex.IsMatch(key, surrogatePattern);
+                
+                // EN: Exclude Map-like emojis from stats so they remain in narrative
+                // FR: Exclure les émojis de type Carte des stats pour qu'ils restent dans la narration
+                bool isMapEmoji = System.Text.RegularExpressions.Regex.IsMatch(key, mapEmojiPattern);
+
+                // If it's an Emoji Key BUT NOT a Map Emoji, OR it's a known Stat Key -> Extract to Stats
+                if ((isEmojiKey && !isMapEmoji) || statKeysToTarget.Any(k => lowKey.Contains(k)))
+                {
+                    state.Stats[key] = val;
+                }
+            }
+
+            // EN: Step 2 - Extract segments that were NOT identified as generic stats as Narrative
+            var narrativeDraft = rpText;
+            foreach (System.Text.RegularExpressions.Match match in matches)
+            {
+                var key = match.Groups["key"].Value;
+                var lowKey = key.ToLowerInvariant();
+                
+                bool isEmojiKey = System.Text.RegularExpressions.Regex.IsMatch(key, surrogatePattern);
+                bool isMapEmoji = System.Text.RegularExpressions.Regex.IsMatch(key, mapEmojiPattern);
+
+                if ((isEmojiKey && !isMapEmoji) || statKeysToTarget.Any(k => lowKey.Contains(k)))
+                {
+                    narrativeDraft = narrativeDraft.Replace(match.Value, "");
+                }
+            }
+
+            // EN: Step 3 - Special Pass for Space-Separated Stats (Lap, Rank) which don't use colons
+            // FR: Étape 3 - Passe spéciale pour les stats séparées par espace (Lap, Rank) sans deux-points
+            // Regex: Word (Lap/Rank) + Space + Value (digits/fraction)
+            var specialMatches = System.Text.RegularExpressions.Regex.Matches(narrativeDraft,
+                @"\b(?<key>Lap|Tour|Rank|Pos|Rank\s+in|Pos\s+in)\s+(?<value>\d+(?:\s*/\s*\d+)?)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            foreach (System.Text.RegularExpressions.Match match in specialMatches)
+            {
+                var key = match.Groups["key"].Value.Trim();
+                var val = match.Groups["value"].Value.Trim();
+                
+                // EN: Simplify key name for internal mapping (Rank in -> Rank)
+                // FR: Simplifier le nom de clé pour le mapping interne
+                var simpleKey = key;
+                if (key.StartsWith("Rank", StringComparison.OrdinalIgnoreCase)) simpleKey = "Rank";
+                if (key.StartsWith("Pos", StringComparison.OrdinalIgnoreCase)) simpleKey = "Pos";
+
+                state.Stats[simpleKey] = val; // Add to stats
+                narrativeDraft = narrativeDraft.Replace(match.Value, ""); // Remove from narrative
+            }
+
+            // EN: Clean up separators left behind (include '·' \u00B7)
+            // FR: Nettoyer les séparateurs restants (incluant '·')
+            // EN: Use Regex split to handle separators more intelligently
+            // Split on |, ,, · OR dash (-) ONLY if it's not between two word characters (protects 1-1, X-Men)
+            var parts = System.Text.RegularExpressions.Regex.Split(narrativeDraft, @"\s*[|,·]\s*|(?<!\w)\s*-\s*|\s*-\s*(?!\w)");
+
+            var narrativeParts = parts
+                .Select(p => p.Trim())
+                .Where(p => !string.IsNullOrEmpty(p) && p.Length > 1) // Filter tiny artifacts
+                .ToList();
+
+            state.Narrative = string.Join(" · ", narrativeParts); // Re-join cleanly
+            return state;
+        }
+
+        /// <summary>
+        /// EN: Public entry point to cleanup old cache files from both overlay folders
+        /// FR: Point d'entrée public pour nettoyer les anciens fichiers cache des dossiers d'overlay
+        /// </summary>
+        public void CleanupCache(bool forceFull = false)
+        {
+            _logger.LogInformation($"[ImageConversion] Explicit cache cleanup triggered (ForceFull: {forceFull}).");
+            CleanupOldOverlays(Path.Combine(_config.CachePath, "overlays"), forceFull);
+            CleanupOldOverlays(Path.Combine(_config.CachePath, "hc_overlays"), forceFull);
+        }
+
+        private void CleanupOldOverlays(string cacheDir, bool forceFull = false)
+        {
+            try 
+            {
+                if (!Directory.Exists(cacheDir)) return;
+                var dirInfo = new DirectoryInfo(cacheDir);
+                
+                // EN: Search for both PNG and GIF files
+                // FR: Rechercher les fichiers PNG et GIF
+                var files = dirInfo.GetFiles("*.png").Concat(dirInfo.GetFiles("*.gif")).ToArray();
+                var threshold = DateTime.Now.AddMinutes(-5); // Keep last 5 minutes by default
+
+                foreach (var f in files)
+                {
+                    if (forceFull || f.CreationTime < threshold)
+                    {
+                        try { f.Delete(); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"[ImageConversion] Cleanup error in {cacheDir}: {ex.Message}");
+            }
+        }
+        
+        private bool IsFontInstalled(string fontName)
+        {
+            using (var fonts = new InstalledFontCollection())
+            {
+                return fonts.Families.Any(f => f.Name.Equals(fontName, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        private OverlayItem? GetOverlayItem(string overlayType, bool isDmd)
+        {
+            return _templateService.GetItem(isDmd ? "dmd" : "mpv", overlayType);
+        }
+
+        /// <summary>
+        /// EN: Generates a single DMD frame containing ALL active overlay elements for preview
+        /// FR: GÃ©nÃ¨re une frame DMD unique contenant TOUS les Ã©lÃ©ments d'overlay actifs pour la prÃ©visualisation
+        /// </summary>
+        private FontFamily GetFontFamilySafe(string nameOrPath, out PrivateFontCollection? pfc)
+        {
+            pfc = null;
+            if (!string.IsNullOrEmpty(nameOrPath) && File.Exists(nameOrPath))
+            {
+                 try {
+                     pfc = new PrivateFontCollection();
+                     pfc.AddFontFile(nameOrPath);
+                     return pfc.Families[0];
+                 } catch {
+                     pfc?.Dispose();
+                     pfc = null;
+                 }
+            }
+            // Fallback safe
+            try { return new FontFamily(nameOrPath ?? "Arial"); }
+            catch { return FontFamily.GenericSansSerif; }
+        }
+
+        /// <summary>
+        /// EN: Generates a single DMD frame containing ALL active overlay elements for preview
+        /// FR: GÃ©nÃ¨re une frame DMD unique contenant TOUS les Ã©lÃ©ments d'overlay actifs pour la prÃ©visualisation
+        /// </summary>
+        private Font GetAdjustedFont(Graphics g, string text, FontFamily fontFamily, int maxSize, int minSize, int width, int height, FontStyle style)
+        {
+            // EN: Iteratively reduce font size until text fits both width and height
+            // FR: Réduire itérativement la taille de la police jusqu'à ce que le texte tienne en largeur et en hauteur
+            for (int size = maxSize; size >= minSize; size--)
+            {
+                var font = new Font(fontFamily, size, style);
+                var textSize = g.MeasureString(text, font);
+                if (textSize.Width <= width && textSize.Height <= height) return font;
+                font.Dispose();
+            }
+            return new Font(fontFamily, minSize, style);
+        }
+
+        public byte[] GenerateDmdFullPreviewFrame(int width, int height, bool useGrayscale)
+        {
+            try
+            {
+                using (var bitmap = new Bitmap(width, height))
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.Black);
+                    g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+
+                    // 1. Get current layout
+                    var layout = _templateService.GetLayout();
+                    
+                    // Sort items by ZOrder to respect layering in preview
+                    var items = layout.DmdItems.OrderBy(x => x.Value.ZOrder).ToList();
+
+                    // Pre-generate sample data
+                    // We reuse the existing generation methods to ensure WYSIWYG preview (fonts, sizes, borders)
+                    
+                    bool challengeShown = false;
+                    foreach (var kvp in items)
+                    {
+                        var type = kvp.Key;
+                        var item = kvp.Value;
+                        if (!item.IsEnabled) continue;
+
+                        string? imagePath = null;
+                        
+                        try
+                        {
+                            switch (type.ToLowerInvariant())
+                            {
+                                case "count": 
+                                    imagePath = GenerateAchievementCountOverlay(15, 35, true, false, true); 
+                                    break;
+                                case "score": 
+                                    imagePath = GenerateScoreOverlay(123456, 999999, true, false, true); 
+                                    break;
+                                case "badges":
+                                    // Complex to mock badges without RaService, skip or draw placeholder
+                                    // For now draw placeholder rect below
+                                    break;
+                                case "unlock":
+                                    // Unlock is usually transient, maybe skip or show placeholder
+                                    break;
+                                case "challenge":
+                                    if (challengeShown) continue;
+                                    imagePath = GenerateDmdChallengeImage(new ChallengeState { IsActive = true, Type = ChallengeType.Progress, Title = "Challenge", CurrentValue = 5, TargetValue = 10, BadgePath = "dummy.png" }, width, height, useGrayscale);
+                                    challengeShown = true;
+                                    break;
+                                case "rp_score":
+                                    imagePath = GenerateRichPresenceItemOverlay("Score", "$: 99,999", false, width, height, true, true, "top-right", 0, true);
+                                    break;
+                                case "rp_lives":
+                                    imagePath = GenerateRichPresenceItemOverlay("Score", "3", false, width, height, true, false, "top-left", 0, true); // Key Score used for Lives type usually maps to Heart if logic dictates, but let's pass generic
+                                     // Actually checking logic: if lowerKey contains "vies" or heart. 
+                                    imagePath = GenerateRichPresenceItemOverlay("Vies", "3", false, width, height, true, false, "top-left", 0, true);
+                                    break;
+                                case "rp_narration":
+                                    // Start of string determines type in RP Item overlay check
+                                    imagePath = GenerateRichPresenceItemOverlay("Narrat", "Narration Test...", false, width, height, true, false, "bottom", 0, true);
+                                    break;
+                                case "rp_stat":
+                                    imagePath = GenerateRichPresenceItemOverlay("Stat", "Stats: X5", false, width, height, true, false, "bottom-left", 0, true);
+                                    break;
+                                case "rp_weapon":
+                                     imagePath = GenerateRichPresenceItemOverlay("Weapon", "Plasma Gun", false, width, height, true, false, "bottom-left", 0, true);
+                                     break;
+                                case "rp_lap":
+                                     imagePath = GenerateRichPresenceItemOverlay("Lap", "Lap 2/3", false, width, height, true, false, "top-left", 0, true);
+                                     break;
+                                case "rp_rank":
+                                     imagePath = GenerateRichPresenceItemOverlay("Rank", "Pos 1/12", false, width, height, true, false, "top-right", 0, true);
+                                     break;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning($"[DMD Preview] Failed to generate preview for {type}: {ex.Message}");
+                        }
+
+                        if (!string.IsNullOrEmpty(imagePath) && File.Exists(imagePath))
+                        {
+                            using (var img = Image.FromFile(imagePath))
+                            {
+                                // Draw at item coordinates. 
+                                // Note: The generated overlays usually include the box at specific coords if they are canvas-sized, OR they are box-sized.
+                                // GenerateRichPresenceItemOverlay returns a BOX-sized image if simply generating an item? 
+                                // Wait, GenerateRichPresenceItemOverlay returns a BOX sized image at lines 3676 (using canvasWidth/Height).
+                                // Actually line 3676: new Bitmap(canvasWidth, canvasHeight)
+                                // So it returns a transparency filled FULL canvas image with the item at the calculated position.
+                                // BUT, GenerateScoreOverlay returns a BOX sized image or Canvas sized?
+                                // GenerateScoreOverlay line 2333: new Bitmap(canvasWidth, canvasHeight) -> Canvas Sized.
+                                
+                                // So we just draw them at 0,0?
+                                // Wait, if the user moves the item in the editor, the `GetOverlayItem` inside `Generate...` picks up the position.
+                                // So `Generate...` creates an image with the item ALREADY at X,Y.
+                                // So we draw at 0,0.
+                                
+                                g.DrawImage(img, 0, 0, width, height); 
+                            }
+                        }
+                        else
+                        {
+                             // Fallback to simple rect for unknown/failed items (badges etc)
+                             using (var pen = new Pen(Color.Gray, 1))
+                             {
+                                 g.DrawRectangle(pen, item.X, item.Y, item.Width, item.Height);
+                                 // g.DrawString(type, SystemFonts.DefaultFont, Brushes.Gray, item.X, item.Y);
+                             }
+                        }
+                    }
+
+                    return GetRawDmdBytes(bitmap, width, height, useGrayscale);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] GenerateDmdFullPreviewFrame Error: {ex.Message}");
+                return new byte[0];
+            }
+        }
+        public byte[] GenerateDmdRichPresenceComposition(Dictionary<string, string> stats, int width, int height, bool useGrayscale, int? activeRpStatIndex = null)
+        {
+            PrivateFontCollection? pfc = null;
+            FontFamily? family = null;
+
+            try
+            {
+                string raFontFamily = _config.RAFontFamily;
+
+                // EN: Check if any stat contains emojis (using robust regex) to force Emoji font if needed
+                if (stats.Keys.Any(k => System.Text.RegularExpressions.Regex.IsMatch(k, @"\p{Cs}|[\u2000-\u3300]")) || 
+                    stats.Values.Any(v => System.Text.RegularExpressions.Regex.IsMatch(v, @"\p{Cs}|[\u2000-\u3300]")))
+                {
+                    if (IsFontInstalled("Segoe UI Emoji")) raFontFamily = "Segoe UI Emoji";
+                }
+
+                // Resolve font family early
+                family = GetFontFamilySafe(raFontFamily, out pfc);
+
+                using (var surface = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(surface))
+                {
+                    g.Clear(Color.Transparent);
+                    g.TextRenderingHint = TextRenderingHint.SingleBitPerPixelGridFit;
+
+                    if (useGrayscale)
+                    {
+                         _logger.LogInformation("[DMD Composition] Generating in Grayscale (ForceMono detected). Colors will be lost.");
+                    }
+
+                    // Group stats to avoid overlap / FR: Grouper les stats pour éviter le chevauchement
+                    var typeMap = new Dictionary<string, List<string>>();
+                    foreach (var kvp in stats)
+                    {
+                        string lk = kvp.Key.ToLowerInvariant();
+                        string type = "rp_stat";
+                        if (lk.Contains("score") || lk.Contains("💵")) type = "rp_score";
+                        else if (lk.Contains("live") || lk.Contains("♥") || lk.Contains("vies")) type = "rp_lives";
+                        else if (lk.Contains("weapon") || lk.Contains("arme") || lk.Contains("🔫")) type = "rp_weapon";
+                        else if (lk.Contains("lap") || lk.Contains("tour")) type = "rp_lap";
+                        else if (lk.Contains("rank") || lk.Contains("pos")) type = "rp_rank";
+                        
+                        if (!typeMap.ContainsKey(type)) typeMap[type] = new List<string>();
+                        
+                        string val = kvp.Value;
+                        if (type == "rp_lives") 
+                        {
+                            val = $"{kvp.Value}♥";
+                        }
+                        else if (type == "rp_stat")
+                        {
+                            // EN: Include Key/Icon for generic stats so user knows what it is
+                            // FR: Inclure Clé/Icône pour les stats génériques pour que l'utilisateur sache ce que c'est
+                            // Check for Emojis (Surrogates + Symbols)
+                            bool isEmoji = System.Text.RegularExpressions.Regex.IsMatch(kvp.Key, @"\p{Cs}|[\u2000-\u3300]");
+                            if (isEmoji)
+                            {
+                                val = $"{kvp.Key} {kvp.Value}"; // "💎 5"
+                            }
+                            else
+                            {
+                                val = kvp.Value; // EN: Text keys too long, show only value
+                            }
+                        }
+                        
+                        typeMap[type].Add(val);
+                    }
+
+                    foreach (var entry in typeMap)
+                    {
+                        string type = entry.Key;
+                        string text = "";
+                        
+                        if (type == "rp_stat")
+                        {
+                            if (activeRpStatIndex.HasValue && activeRpStatIndex.Value >= 0 && activeRpStatIndex.Value < entry.Value.Count)
+                            {
+                                // Rotation enabled: show only current index
+                                text = entry.Value[activeRpStatIndex.Value];
+                            }
+                            else
+                            {
+                                // Join with divider if not rotating or index invalid
+                                text = string.Join(" | ", entry.Value);
+                            }
+                        }
+                        else
+                        {
+                            text = entry.Value.FirstOrDefault() ?? "";
+                        }
+
+                        var overlayItem = GetOverlayItem(type, true);
+                        if (overlayItem != null && overlayItem.IsEnabled)
+                        {
+                            int rx = overlayItem.X;
+                            int ry = overlayItem.Y;
+                            int rw = overlayItem.Width;
+                            int rh = overlayItem.Height;
+                            // Start of grouped render
+                        
+                        
+                        
+
+                        
+                            
+                            
+
+                            
+
+                            int maxFontSize = (height < 64 ? 8 : 12); // Slightly larger max
+                            int minFontSize = 6;
+                            
+                            // Get adjusted font that fits
+                            Font? font = null;
+                            if (overlayItem.FontSize > 0)
+                            {
+                                font = new Font(family ?? FontFamily.GenericSansSerif, overlayItem.FontSize, FontStyle.Bold);
+                            }
+                            else
+                            {
+                                try 
+                                { 
+                                    font = GetAdjustedFont(g, text, family ?? FontFamily.GenericSansSerif, maxFontSize, minFontSize, overlayItem.Width - 4, overlayItem.Height - 2, FontStyle.Bold);
+                                } 
+                                catch 
+                                { 
+                                    font = GetAdjustedFont(g, text, FontFamily.GenericSansSerif, maxFontSize, minFontSize, overlayItem.Width - 4, overlayItem.Height - 2, FontStyle.Bold);
+                                }
+                            }
+
+                            using (font)
+                            {
+                                Color textColor = GetColorFromHex(overlayItem.TextColor, Color.Gold);
+                                using (var brush = new SolidBrush(textColor))
+                                {
+                                    var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                                    if (type == "rp_score") format.Alignment = StringAlignment.Far;
+
+                                    RectangleF rect = new RectangleF(rx, ry, rw, rh);
+                                    DrawStringWithOutline(g, text, font, brush, rect, format, true);
+                                }
+                            }
+                        }
+                    }
+
+                    return GetRawDmdBytes(surface, width, height, useGrayscale);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Failed to generate DMD RP composition: {ex.Message}");
+                return new byte[0];
+            }
+            finally
+            {
+                if (pfc != null) pfc.Dispose();
+                else family?.Dispose();
+            }
+        }
+        /// <summary>
+        /// EN: Generate a scrolling text GIF for MPV using FFmpeg
+        /// FR: Générer un GIF de texte défilant pour MPV via FFmpeg
+        /// </summary>
+        private string GenerateScrollingTextGif(string text, Font font, int width, int height, Color bgColor, Color textColor, bool isHardcore, CancellationToken token = default)
+        {
+            try
+            {
+                string tempDir = Path.Combine(Path.GetTempPath(), $"retrobat_marquee_gif_frames_{DateTime.Now.Ticks}");
+                Directory.CreateDirectory(tempDir);
+
+                using (var dummyBmp = new Bitmap(1, 1))
+                using (var g = Graphics.FromImage(dummyBmp))
+                {
+                    var textSize = g.MeasureString(text, font);
+                    int textWidth = (int)textSize.Width;
+                    
+                    // Logic: Scroll from Right edge to Left edge completely
+                    // Frame count depends on speed. let's say 4 pixels per frame (MPV usually runs 30-60fps)
+                    // But GIF might be slower. 4px @ 30fps is decent.
+                    int speed = 4;
+                    int totalFrames = (width + textWidth) / speed;
+                    
+                    // Cap frames to avoid huge files
+                    if (totalFrames > 300) { speed *= 2; totalFrames = (width + textWidth) / speed; }
+
+                    using (var brushBg = new SolidBrush(bgColor))
+                    using (var brushText = new SolidBrush(textColor))
+                    {
+                        var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center };
+                        
+                        for (int i = 0; i < totalFrames; i++)
+                        {
+                            if (token.IsCancellationRequested)
+                            {
+                                try { Directory.Delete(tempDir, true); } catch { }
+                                return string.Empty;
+                            }
+                            using (var frame = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                            using (var gf = Graphics.FromImage(frame))
+                            {
+                                gf.Clear(Color.Transparent);
+                                gf.FillRectangle(brushBg, 0, 0, width, height);
+                                
+                                // Draw Border frame (MPV style: Silver 2px)
+                                using (var pen = new Pen(Color.Silver, 2))
+                                {
+                                    gf.DrawRectangle(pen, 0, 0, width, height);
+                                }
+
+                                int x = width - (i * speed);
+                                RectangleF rect = new RectangleF(x, 0, textWidth + 10, height);
+                                
+                                gf.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                                gf.DrawString(text, font, brushText, rect, format);
+                                
+                                frame.Save(Path.Combine(tempDir, $"frame_{i:000}.png"), ImageFormat.Png);
+                            }
+                        }
+                    }
+                }
+
+                // Call FFmpeg to make GIF
+                string ffmpegPath = FindFfmpeg();
+                if (string.IsNullOrEmpty(ffmpegPath)) return string.Empty;
+
+                string subFolder = isHardcore ? "hc_overlays" : "overlays";
+                string gifPath = Path.Combine(_config.CachePath, subFolder, $"scrolling_rp_{DateTime.Now.Ticks}.gif");
+                if (!Directory.Exists(Path.GetDirectoryName(gifPath)!)) Directory.CreateDirectory(Path.GetDirectoryName(gifPath)!);
+                
+                // ffmpeg -framerate 30 -i frame_%03d.png -vf "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" output.gif
+                string args = $"-y -framerate 30 -i \"{Path.Combine(tempDir, "frame_%03d.png")}\" -vf \"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{gifPath}\"";
+                
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                var proc = Process.Start(startInfo);
+                if (proc != null)
+                {
+                    using (proc)
+                    {
+                        if (!proc.WaitForExit(30000)) // 30s max
+                        {
+                            _logger.LogWarning($"[GIF Debug] FFmpeg timed out after 30s for: {text}");
+                            try { proc.Kill(); } catch { }
+                        }
+
+                        if (proc.ExitCode != 0)
+                        {
+                            string err = proc.StandardError.ReadToEnd();
+                            _logger.LogWarning($"[GIF Debug] FFmpeg failed with code {proc.ExitCode}: {err}");
+                        }
+                    }
+                }
+
+                try { Directory.Delete(tempDir, true); } catch { }
+
+                return File.Exists(gifPath) ? gifPath : string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Failed to generate scrolling GIF: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+        private void DrawStringWithOutline(Graphics g, string text, Font font, Brush brush, RectangleF rect, StringFormat format, bool isDmd)
+        {
+            if (isDmd)
+            {
+                // EN: Draw Dark Gray outline for better legibility on DMD (Matches background to avoid transparency holes)
+                // FR: Dessiner un contour Gris Foncé pour une meilleure lisibilité sur DMD (Correspond au fond pour éviter les trous de transparence)
+                using (var outlineBrush = new SolidBrush(Color.FromArgb(255, 60, 60, 60)))
+                {
+                    var offsetRect = rect;
+                    
+                    // Simple 4-way shadow/outline
+                    offsetRect.Offset(-1, 0); g.DrawString(text, font, outlineBrush, offsetRect, format);
+                    offsetRect = rect; offsetRect.Offset(1, 0); g.DrawString(text, font, outlineBrush, offsetRect, format);
+                    offsetRect = rect; offsetRect.Offset(0, -1); g.DrawString(text, font, outlineBrush, offsetRect, format);
+                    offsetRect = rect; offsetRect.Offset(0, 1); g.DrawString(text, font, outlineBrush, offsetRect, format);
+                }
+            }
+            
+            g.DrawString(text, font, brush, rect, format);
+        }
+
+        private Color GetColorFromHex(string hex, Color defaultColor)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(hex)) return defaultColor;
+                return ColorTranslator.FromHtml(hex);
+            }
+            catch { return defaultColor; }
+        }
+        private async Task<string> GenerateFullscreenScrollingGif(string text, Font font, int width, int height, RectangleF boxRect, string? backgroundPath, Color boxColor, Color textColor, bool isHardcore, CancellationToken token = default)
+        {
+            Image? bgImage = null;
+                if (!string.IsNullOrEmpty(backgroundPath) && File.Exists(backgroundPath))
+                {
+                    try { bgImage = Image.FromFile(backgroundPath); } catch { }
+                }
+
+                // EN: Check if we already have a cached GIF for this exact text and settings
+                // FR: Vérifier si on a déjà un GIF en cache pour ce texte et ces paramètres exacts
+                string safeText = Sanitize(text);
+                if (safeText.Length > 30) safeText = safeText.Substring(0, 30);
+                string subFolder = isHardcore ? "hc_overlays" : "overlays";
+                
+                // Use hash of full text and params to ensure uniqueness even if sanitized text is same
+                int configHash = $"{text}_{width}_{height}_{boxRect.X}_{boxRect.Y}_{boxRect.Width}_{boxRect.Height}_{boxColor.ToArgb()}_{textColor.ToArgb()}_{backgroundPath}".GetHashCode();
+                string cachedGifPath = Path.Combine(_config.CachePath, subFolder, $"rp_narration_{safeText}_{configHash}.gif");
+
+                if (File.Exists(cachedGifPath))
+                {
+                    _logger.LogInformation($"[GIF Debug] Returning cached GIF for: {text}");
+                    bgImage?.Dispose();
+                    return cachedGifPath;
+                }
+
+                // EN: Lock to ensure only one FFmpeg process runs at a time for GIF generation
+                // FR: Verrou pour s'assurer qu'un seul processus FFmpeg tourne à la fois pour la génération de GIF
+                await _gifGenerationLock.WaitAsync(token);
+                try
+                {
+                    // Re-check after lock
+                    if (File.Exists(cachedGifPath))
+                    {
+                        bgImage?.Dispose();
+                        return cachedGifPath;
+                    }
+
+                    int speed = 12;
+                float textWidth = 0;
+                using (var dummyBmp = new Bitmap(1, 1))
+                using (var g = Graphics.FromImage(dummyBmp))
+                {
+                     var textSize = g.MeasureString(text, font);
+                     textWidth = textSize.Width;
+                }
+
+                // Initial calculation of frames
+                // Logic: Scroll from Right edge of BOX to Left edge of BOX
+                int totalFrames = (int)((boxRect.Width + textWidth) / speed) + 50; 
+                    
+                // Cap frames to avoid huge files if text is extremely long, but allow enough for scrolling
+                // FR: Limiter les frames
+                if (totalFrames > 400) { speed = 12; totalFrames = (int)((boxRect.Width + textWidth) / speed) + 50; }
+
+                _logger.LogInformation($"[GIF Debug] Starting GIF Generation (Speed: {speed}, Frames: {totalFrames}, Filter: PaletteGen)");
+
+                // Call FFmpeg
+                string ffmpegPath = FindFfmpeg();
+                if (string.IsNullOrEmpty(ffmpegPath)) 
+                {
+                     bgImage?.Dispose();
+                     return string.Empty;
+                }
+
+                string subFolder_inner = isHardcore ? "hc_overlays" : "overlays";
+                // Use the deterministic cachedGifPath instead of random timestamp
+                string gifPath = cachedGifPath;
+                if (!Directory.Exists(Path.GetDirectoryName(gifPath)!)) Directory.CreateDirectory(Path.GetDirectoryName(gifPath)!);
+
+                // Initialize ffmpeg args for image2pipe
+                // Use palettegen/paletteuse for transparency support and high quality
+                // -loop 0 sets the GIF to loop infinitely
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = $"-y -f image2pipe -framerate 30 -i - -filter_complex \"[0:v] split [a][b];[a] palettegen=reserve_transparent=1 [p];[b][p] paletteuse\" -loop 0 \"{gifPath}\"",
+                    RedirectStandardInput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                var process = Process.Start(startInfo);
+                if (process == null)
+                {
+                    _logger.LogError("Failed to start FFmpeg process.");
+                    bgImage?.Dispose();
+                    return string.Empty;
+                }
+
+                // Write frames to stdin
+                using (var stdin = process.StandardInput.BaseStream)
+                using (Bitmap frame = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                using (Graphics gf = Graphics.FromImage(frame))
+                {
+                    gf.SmoothingMode = SmoothingMode.AntiAlias;
+                    gf.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+
+                    using (var brushBox = new SolidBrush(boxColor))
+                    using (var brushText = new SolidBrush(textColor))
+                    using (var shadowBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+                    {
+                        var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
+
+                        for (int i = 0; i < totalFrames; i++)
+                        {
+                            if (token.IsCancellationRequested)
+                            {
+                                try { process.Kill(); } catch { }
+                                return string.Empty;
+                            }
+                            gf.Clear(Color.Transparent); // Clear frame with transparency
+
+                            // 1. Draw Static Background (if any)
+                            if (bgImage != null)
+                            {
+                                gf.DrawImage(bgImage, 0, 0, width, height);
+                            }
+                            
+                            // 2. Draw Box Background
+                            if (boxColor.A > 0)
+                            {
+                                gf.FillRectangle(brushBox, boxRect);
+                            }
+
+                            // 3. Draw Scrolling Text with Clipping
+                            gf.SetClip(boxRect);
+
+                            // Calculate X position
+                            // Start slightly inside (Right - 20) to appear faster
+                            float currentX = (boxRect.Right - 20) - (i * speed);
+
+                            // Use a generous width to prevent any word wrap clipping
+                            RectangleF drawRect = new RectangleF(currentX, boxRect.Y, textWidth + 100, boxRect.Height);
+
+                            // Shadow
+                            var shadowRect = drawRect;
+                            shadowRect.Offset(2, 2);
+                            gf.DrawString(text, font, shadowBrush, shadowRect, format);
+
+                            // Text
+                            gf.DrawString(text, font, brushText, drawRect, format);
+
+                            gf.ResetClip();
+
+                            // Write to FFmpeg stdin
+                            frame.Save(stdin, ImageFormat.Png);
+                        }
+                    }
+                }
+
+                // Wait for FFmpeg to finish
+                // Read stderr to avoid deadlocks and capture errors
+                string stderr = process.StandardError.ReadToEnd();
+                process.WaitForExit(30000); // 30s max
+                
+                if (process.ExitCode != 0)
+                {
+                    _logger.LogWarning($"[GIF Debug] FFMPEG Exited with Code {process.ExitCode}. Error: {stderr}");
+                }
+
+                if (bgImage != null) bgImage.Dispose();
+
+
+                return File.Exists(gifPath) ? gifPath : string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Failed to generate fullscreen scrolling GIF: {ex.Message}");
+                return string.Empty;
+            }
+            finally
+            {
+                _gifGenerationLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// EN: Generates a specialized Preview Mode status overlay (Bottom-Left, Semi-transparent)
+        /// FR: Génère un overlay de statut Mode Aperçu spécialisé (Bas-Gauche, Semi-transparent)
+        /// </summary>
+        public string GeneratePreviewStatusOverlay(string text, int width, int height)
+        {
+            try
+            {
+                string outputFolder = Path.Combine(_config.CachePath, "overlays");
+                Directory.CreateDirectory(outputFolder);
+                string fileName = $"preview_status_{DateTime.Now.Ticks}.png";
+                string outputPath = Path.Combine(outputFolder, fileName);
+
+                using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.Transparent);
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+
+                    // 1. Prepare Font
+                    using (var font = new Font("Segoe UI", 12, FontStyle.Bold)) // Fixed small size
+                    using (var brushText = new SolidBrush(Color.FromArgb(153, 255, 255, 255))) // White at 60% Opacity (255 * 0.6 = 153)
+                    using (var brushBg = new SolidBrush(Color.FromArgb(100, 0, 0, 0))) // Black transparent bg
+                    {
+                        var textSize = g.MeasureString(text, font);
+                        int padding = 5;
+                        int boxW = (int)textSize.Width + (padding * 2);
+                        int boxH = (int)textSize.Height + (padding * 2);
+
+                        // Position: Bottom Left with margin
+                        int margin = 20;
+                        int x = margin;
+                        int y = height - boxH - margin;
+
+                        // Draw Box
+                        Rectangle rect = new Rectangle(x, y, boxW, boxH);
+                        g.FillRectangle(brushBg, rect);
+
+                        // Draw Text
+                        g.DrawString(text, font, brushText, x + padding, y + padding);
+                    }
+
+                    bitmap.Save(outputPath, ImageFormat.Png);
+                }
+                return outputPath;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[ImageConversion] GeneratePreviewStatusOverlay Error: {ex.Message}");
+                return string.Empty;
+            }
+        }
+
     }
 }
+

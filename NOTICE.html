@@ -234,6 +234,8 @@
                     class="lang-fr">Fonctionnalités</a></li>
             <li><a href="#config-menu" class="lang-en">Config Menu</a><a href="#config-menu" class="lang-fr">Menu
                     Config</a></li>
+            <li><a href="#overlay-designer" class="lang-en">Overlay Designer</a><a href="#overlay-designer"
+                    class="lang-fr">Designer d'Overlays</a></li>
             <li><a href="#controls" class="lang-en">In-Game Controls</a><a href="#controls" class="lang-fr">Contrôles en
                     jeu</a></li>
             <li><a href="#config-general" class="lang-en">General Config</a><a href="#config-general"
@@ -244,6 +246,8 @@
             </li>
             <li><a href="#config-mpv" class="lang-en">MPV Config</a><a href="#config-mpv" class="lang-fr">Config MPV</a>
             </li>
+            <li><a href="#overlay-items" class="lang-en">Overlay Items</a><a href="#overlay-items"
+                    class="lang-fr">Éléments d'Overlay</a></li>
             <li><a href="#config-achievements" class="lang-en">RetroAchievements</a><a href="#config-achievements"
                     class="lang-fr">RetroAchievements</a></li>
             <li><a href="#pinball" class="lang-en">Pinball Support</a><a href="#pinball" class="lang-fr">Support
@@ -303,21 +307,53 @@
                 </div>
             </div>
 
+            <div id="overlay-designer">
+                <h2 class="lang-en">Overlay Designer</h2>
+                <h2 class="lang-fr">Designer d'Overlays</h2>
+                <div class="lang-en">
+                    <p>The visual editor allows you to customize the layout of RetroAchievements overlays without
+                        editing JSON files:</p>
+                    <ul>
+                        <li>Access it via the <strong>RetroBat Marquee Manager Launcher</strong>.</li>
+                        <li><strong>Features:</strong> WYSIWYG editing, drag & drop positioning, color/font size
+                            customization, and <strong>Live Preview</strong>.</li>
+                        <li><strong>Compatibility:</strong> Works for both MPV (Marquee screen) and DMD hardware.</li>
+                    </ul>
+                </div>
+                <div class="lang-fr">
+                    <p>L'éditeur visuel vous permet de personnaliser la disposition des overlays RetroAchievements sans
+                        éditer de fichiers JSON :</p>
+                    <ul>
+                        <li>Accédez-y via le <strong>RetroBat Marquee Manager Launcher</strong>.</li>
+                        <li><strong>Fonctionnalités :</strong> Édition WYSIWYG, positionnement par glisser-déposer,
+                            personnalisation des couleurs/tailles de police, et <strong>Prévisualisation en
+                                Direct</strong>.</li>
+                        <li><strong>Compatibilité :</strong> Fonctionne aussi bien pour MPV (écran Marquee) que pour le
+                            matériel DMD.</li>
+                    </ul>
+                </div>
+            </div>
+
             <div id="features">
                 <h2 class="lang-en">Main Features</h2>
                 <h2 class="lang-fr">Principales Fonctionnalités</h2>
                 <ul class="lang-en">
                     <li><strong>Dynamic Display</strong>: Auto-detection of systems, collections, and games.</li>
                     <li><strong>Smart Composition</strong>: Automatic Logo + Fanart merging.</li>
+                    <li><strong>Overlay Designer</strong>: Visual editor for RetroAchievements layouts.</li>
                     <li><strong>Media Support</strong>: PNG, JPG, SVG, and MP4 animations via MPV.</li>
                     <li><strong>Live Real-Time Editor</strong>: Adjust positions directly on screen while playing.</li>
+                    <li><strong>Smart Cache</strong>: Periodic cleanup of generated temporary overlays.</li>
                 </ul>
                 <ul class="lang-fr">
                     <li><strong>Affichage Dynamique</strong> : Auto-détection des systèmes, collections et jeux.</li>
                     <li><strong>Composition Intelligente</strong> : Fusion automatique Logo + Fanart.</li>
+                    <li><strong>Designer d'Overlays</strong> : Éditeur visuel pour les mises en page RetroAchievements.
+                    </li>
                     <li><strong>Support Médias</strong> : PNG, JPG, SVG et animations MP4 via MPV.</li>
                     <li><strong>Éditeur Temps Réel</strong> : Ajustez les positions directement à l'écran en jouant.
                     </li>
+                    <li><strong>Cache Intelligent</strong> : Nettoyage périodique des overlays temporaires générés.</li>
                 </ul>
             </div>
 
@@ -480,19 +516,24 @@
                         <p class="config-desc">Options available only via direct <code>config.ini</code> edit:</p>
                         <ul>
                             <li><strong>HwDecoding</strong>: MPV Playback (<code>auto</code>, <code>d3d11va</code>,
-                                <code>dxva2</code>, <code>no</code>).</li>
+                                <code>dxva2</code>, <code>no</code>).
+                            </li>
                             <li><strong>FfmpegHwEncoding</strong>: Video Generation (<code>nvenc</code>,
-                                <code>h264_amf</code>, <code>h264_qsv</code>, <code>cpu</code>).</li>
+                                <code>h264_amf</code>, <code>h264_qsv</code>, <code>cpu</code>).
+                            </li>
                         </ul>
                     </div>
                     <div class="lang-fr">
                         <p class="config-desc">Options disponibles uniquement via édition directe de
-                            <code>config.ini</code> :</p>
+                            <code>config.ini</code> :
+                        </p>
                         <ul>
                             <li><strong>HwDecoding</strong> : Lecture MPV (<code>auto</code>, <code>d3d11va</code>,
-                                <code>dxva2</code>, <code>no</code>).</li>
+                                <code>dxva2</code>, <code>no</code>).
+                            </li>
                             <li><strong>FfmpegHwEncoding</strong> : Génération Vidéo (<code>nvenc</code>,
-                                <code>h264_amf</code>, <code>h264_qsv</code>, <code>cpu</code>).</li>
+                                <code>h264_amf</code>, <code>h264_qsv</code>, <code>cpu</code>).
+                            </li>
                         </ul>
                     </div>
                 </div>
@@ -588,6 +629,128 @@
                 </div>
             </div>
 
+            <div id="overlay-items">
+                <h2 class="lang-en">RetroAchievements Integration</h2>
+                <h2 class="lang-fr">Intégration RetroAchievements</h2>
+                <p class="lang-en">These settings are configured in the main <strong>RetroAchievements</strong> menu of
+                    the Launcher.</p>
+                <p class="lang-fr">Ces paramètres sont configurés dans le menu principal
+                    <strong>RetroAchievements</strong> du Launcher.
+                </p>
+
+                <h3>Standard Overlays</h3>
+                <p class="lang-en">Activated via the <strong>"Overlays"</strong> list (comma separated). These are
+                    persistent elements:</p>
+                <p class="lang-fr">Activés via la liste <strong>"Overlays"</strong> (séparés par des virgules). Ce sont
+                    des éléments persistants :</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th class="lang-en">Description</th>
+                            <th class="lang-fr">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>count</code></td>
+                            <td class="lang-en">Achievement progress (e.g. 5/35).</td>
+                            <td class="lang-fr">Progression des succès (ex: 5/35).</td>
+                        </tr>
+                        <tr>
+                            <td><code>score</code></td>
+                            <td class="lang-en">Cumulative player score for the current game.</td>
+                            <td class="lang-fr">Score cumulé du joueur pour le jeu actuel.</td>
+                        </tr>
+                        <tr>
+                            <td><code>badges</code></td>
+                            <td class="lang-en">The scrolling ribbon of achievement badges.</td>
+                            <td class="lang-fr">Le ruban défilant des badges de succès.</td>
+                        </tr>
+                        <tr>
+                            <td><code>challenge</code></td>
+                            <td class="lang-en">Real-time indicator for active Hardcore challenges.</td>
+                            <td class="lang-fr">Indicateur en temps réel pour les défis Hardcore actifs.</td>
+                        </tr>
+                        <tr>
+                            <td><code>items</code></td>
+                            <td class="lang-en">Dynamic Rich Presence statistics (group of items like lives, stats,
+                                etc.).</td>
+                            <td class="lang-fr">Statistiques Rich Presence dynamiques (groupe d'éléments comme vies,
+                                stats, etc.).
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>Dynamic Notifications</h3>
+                <p class="lang-en">Activated via the <strong>"Notifications"</strong> checkboxes. These elements are
+                    transient:</p>
+                <p class="lang-fr">Activés via les cases à cocher <strong>"Notifications"</strong>. Ces éléments sont
+                    éphémères :</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th class="lang-en">Description</th>
+                            <th class="lang-fr">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>unlock</code></td>
+                            <td class="lang-en">Animation triggered during a new achievement unlock.</td>
+                            <td class="lang-fr">Animation déclenchée lors d'un nouveau succès débloqué.</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>Layout Customization (rp_*)</h3>
+                <p class="lang-en">When using a custom layout in the <strong>Overlay Designer</strong>, these
+                    identifiers allow you to position each Rich Presence stat individually:</p>
+                <p class="lang-fr">En utilisant une mise en page personnalisée dans le <strong>Designer
+                        d'Overlays</strong>, ces identifiants permettent de positionner chaque stat Rich Presence
+                    individuellement :</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Item ID</th>
+                            <th class="lang-en">Description</th>
+                            <th class="lang-fr">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>rp_score</code></td>
+                            <td class="lang-en">In-game score reported by Rich Presence.</td>
+                            <td class="lang-fr">Score en jeu rapporté par le Rich Presence.</td>
+                        </tr>
+                        <tr>
+                            <td><code>rp_lives</code></td>
+                            <td class="lang-en">Remaining lives or health indicator.</td>
+                            <td class="lang-fr">Indicateur de vies restantes ou de santé.</td>
+                        </tr>
+                        <tr>
+                            <td><code>rp_narration</code></td>
+                            <td class="lang-en">Scrolling status text or narrative messages (automatically scrolls if
+                                too long).</td>
+                            <td class="lang-fr">Texte de statut ou messages narratifs (défilement auto si trop long).
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>rp_stat</code></td>
+                            <td class="lang-en">Generic game statistics (e.g. Level, Stage).</td>
+                            <td class="lang-fr">Statistiques de jeu génériques (ex: Niveau, Étape).</td>
+                        </tr>
+                        <tr>
+                            <td><code>rp_weapon</code></td>
+                            <td class="lang-en">Currently equipped weapon or special item.</td>
+                            <td class="lang-fr">Arme ou objet spécial actuellement équipé.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
             <div id="config-achievements">
                 <h2 class="lang-en">RetroAchievements Integration</h2>
                 <h2 class="lang-fr">Intégration RetroAchievements</h2>
@@ -618,6 +781,16 @@
                             <li><code>count</code>: Shows progress (e.g. 10/45).</li>
                         </ul>
                         <p class="config-desc">Example: <code>score,badges</code></p>
+                        <h3>Customization</h3>
+                        <ul>
+                            <li><strong>Styling</strong>: Use the <strong>Overlay Designer</strong> to change colors,
+                                font sizes, and visibility.</li>
+                            <li><strong>Narration</strong>: Supports long narrative text with automatic scrolling on
+                                both displays.</li>
+                            <li><strong>Fonts</strong>: Drop <code>.ttf</code> files in
+                                <code>medias/retroachievements/fonts/</code> to use custom fonts.
+                            </li>
+                        </ul>
                     </div>
                     <div class="lang-fr">
                         <p class="config-desc">Liste des overlays à afficher, séparés par des virgules. Options :</p>
@@ -627,6 +800,40 @@
                             <li><code>count</code> : Affiche la progression (ex: 10/45).</li>
                         </ul>
                         <p class="config-desc">Exemple : <code>score,badges</code></p>
+                        <h3>Personnalisation</h3>
+                        <ul>
+                            <li><strong>Style</strong> : Utilisez le <strong>Designer d'Overlays</strong> pour changer
+                                les couleurs, tailles de police et visibilité.</li>
+                            <li><strong>Narration</strong> : Supporte les longs textes narratifs avec défilement
+                                automatique sur les deux affichages.</li>
+                            <li><strong>Polices</strong> : Déposez des fichiers <code>.ttf</code> dans
+                                <code>medias/retroachievements/fonts/</code> pour utiliser des polices personnalisées.
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="config-card">
+                    <span class="config-key">Supported Emulators</span>
+                    <div class="lang-en">
+                        <p class="config-desc">Automatic detection of Hardcore Mode and game status for:</p>
+                        <ul>
+                            <li><strong>RetroArch</strong> (All cores)</li>
+                            <li><strong>PCSX2</strong> (Standalone)</li>
+                            <li><strong>DuckStation</strong> (Standalone)</li>
+                            <li><strong>Dolphin</strong> (Standalone)</li>
+                            <li><strong>PPSSPP</strong> (Standalone)</li>
+                        </ul>
+                    </div>
+                    <div class="lang-fr">
+                        <p class="config-desc">Détection automatique du Mode Hardcore et du statut du jeu pour :</p>
+                        <ul>
+                            <li><strong>RetroArch</strong> (Tous les cœurs)</li>
+                            <li><strong>PCSX2</strong> (Standalone)</li>
+                            <li><strong>DuckStation</strong> (Standalone)</li>
+                            <li><strong>Dolphin</strong> (Standalone)</li>
+                            <li><strong>PPSSPP</strong> (Standalone)</li>
+                        </ul>
                     </div>
                 </div>
             </div>

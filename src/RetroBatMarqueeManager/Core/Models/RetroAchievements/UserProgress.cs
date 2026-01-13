@@ -43,6 +43,12 @@ namespace RetroBatMarqueeManager.Core.Models.RetroAchievements
         public Dictionary<string, Achievement> Achievements { get; set; } = new();
 
         /// <summary>
+        /// EN: List of all leaderboards for this game
+        /// FR: Liste de tous les leaderboards pour ce jeu
+        /// </summary>
+        public List<Leaderboard> Leaderboards { get; set; } = new();
+
+        /// <summary>
         /// EN: Game information
         /// FR: Informations du jeu
         /// </summary>

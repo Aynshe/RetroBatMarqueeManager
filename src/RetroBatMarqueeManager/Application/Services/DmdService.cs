@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Drawing;
 using System.Drawing.Imaging;
+using RetroBatMarqueeManager.Core.Models.RetroAchievements;
 
 namespace RetroBatMarqueeManager.Application.Services
 {
@@ -20,6 +21,10 @@ namespace RetroBatMarqueeManager.Application.Services
         private bool _isNativeOpen = false;
         private string? _lastMediaPath = null;
         private CancellationTokenSource? _animationCts = null;
+        private CancellationTokenSource? _overlayAnimationCts = null;
+        private CancellationTokenSource? _rpLoopCts = null;
+        private Task? _rpLoopTask = null;
+        private List<byte[]>? _rpFrames = null;
         private bool _isExternalControlActive = false;
 
         public DmdService(
@@ -754,6 +759,12 @@ namespace RetroBatMarqueeManager.Application.Services
                     _animationCts.Dispose();
                     _animationCts = null;
                 }
+                if (_overlayAnimationCts != null)
+                {
+                    _overlayAnimationCts.Cancel();
+                    _overlayAnimationCts.Dispose();
+                    _overlayAnimationCts = null;
+                }
             }
             catch (Exception ex)
             {
@@ -764,92 +775,394 @@ namespace RetroBatMarqueeManager.Application.Services
         private byte[]? _activeOverlayBytes;
         private DateTime? _overlayExpiry;
         private readonly object _overlayLock = new object();
+        private byte[]? _persistentScoreBytes; // EN: Persistent score overlay / FR: Overlay du score permanent
+        private readonly object _scoreLock = new object();
         private byte[]? _currentStaticBytes; // Store current static image for composition
         
-        public async Task PlayAchievementSequenceAsync(string cupPath, string badgePath, string text, int totalDurationMs = 10000)
+        public async Task SetDmdPersistentScoreAsync(string scoreText)
         {
-             // 1. Show Cup (2s)
-             if (!string.IsNullOrEmpty(cupPath) && File.Exists(cupPath))
-             {
-                 await SetOverlayAsync(cupPath, 2000);
-                 await Task.Delay(2000);
-             }
+            try
+            {
+                bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                if (_isNativeOpen && _dmdWrapper.IsLoaded)
+                {
+                    var method = _dmdWrapper.RenderMethodName ?? "";
+                    if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
+                }
+
+                var bytes = _imageService.GenerateDmdPersistentScoreFrame(scoreText, _config.DmdWidth, _config.DmdHeight, useGrayscale);
+                
+                lock(_scoreLock)
+                {
+                    _persistentScoreBytes = bytes;
+                }
+
+                // Trigger render refresh if in static mode
+                if (_animationCts == null && _isNativeOpen)
+                {
+                    RenderStaticWithOverlay(useGrayscale); 
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[DMD] SetDmdPersistentScoreAsync error: {ex.Message}");
+            }
+            await Task.CompletedTask;
+        }
+
+        public async Task SetDmdPersistentLayoutAsync(byte[] layoutBytes)
+        {
+            try
+            {
+                lock(_scoreLock)
+                {
+                    _persistentScoreBytes = layoutBytes;
+                }
+
+                // Trigger render refresh
+                if (_animationCts == null && _isNativeOpen)
+                {
+                    bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                    if (_isNativeOpen && _dmdWrapper.IsLoaded)
+                    {
+                        var method = _dmdWrapper.RenderMethodName ?? "";
+                        if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
+                    }
+                    RenderStaticWithOverlay(useGrayscale); 
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[DMD] SetDmdPersistentLayoutAsync error: {ex.Message}");
+            }
+            await Task.CompletedTask;
+        }
+
+        public async Task PlayAchievementSequenceAsync(string cupPath, string achOverlayPath, int totalDurationMs = 10000)
+        {
+             lock(_overlayLock) { _isSequencePlaying = true; }
              
-             // 2. Scroll Text (Variable duration, aim for 3-4s, but depends on length)
-             // Generate frames first to be ready
+             try
+             {
+                 // 1. Show Cup (2s)
+                 if (!string.IsNullOrEmpty(cupPath) && File.Exists(cupPath))
+                 {
+                     _logger.LogInformation($"[DMD Sequence] Playing Cup: {cupPath}");
+                     await SetOverlayAsync(cupPath, 2000);
+                     await Task.Delay(2000);
+                 }
+                 else
+                 {
+                     _logger.LogWarning($"[DMD Sequence] Cup path missing or invalid: {cupPath}");
+                 }
+                 
+                 // 2. Show Composite Overlay (Remainder)
+                 if (!string.IsNullOrEmpty(achOverlayPath))
+                 {
+                     if (File.Exists(achOverlayPath))
+                     {
+                         var info = new FileInfo(achOverlayPath);
+                         _logger.LogInformation($"[DMD Sequence] Playing Achievement Overlay: {achOverlayPath} (Size: {info.Length} bytes)");
+                         
+                         await SetOverlayAsync(achOverlayPath, 8000); // 8s final static (Total ~10s)
+                         await Task.Delay(8000);
+                     }
+                     else
+                     {
+                          _logger.LogWarning($"[DMD Sequence] Achievement Overlay file not found: {achOverlayPath}");
+                     }
+                 }
+                 else
+                 {
+                     _logger.LogWarning("[DMD Sequence] Achievement Overlay path is null/empty.");
+                 }
+             }
+             catch(Exception ex)
+             {
+                 _logger.LogError($"[DMD Sequence] Error: {ex.Message}");
+             }
+             finally
+             {
+                 lock(_overlayLock) { _isSequencePlaying = false; }
+                 _logger.LogInformation("[DMD Sequence] Finished.");
+             }
+        }
+
+        private bool _isSequencePlaying = false;
+
+        public async Task PlayRichPresenceNotificationAsync(string text, int durationMs = 5000, int? yOverride = null, int? heightOverride = null, string? textColor = null, float? fontSize = null)
+        {
+             // EN: Check if an achievement sequence is currently playing
+             // FR: Vérifier si une séquence de succès est en cours
+             bool isBusy = false;
+             lock(_overlayLock) { isBusy = _isSequencePlaying; }
+
+             if (isBusy) 
+             {
+                 // EN: Skip or delay? User said "it must display after".
+                 // But RP updates are fleeting. If we delay, the data might be stale.
+                 // However, "Lives: 0" isn't stale quickly.
+                 // Simple approach: Just skip RP update if busy with Achievement? 
+                 // Or wait?
+                 // User: "il doit s'afficher apres" (it must display after).
+                 // We will wait slightly. 
+                 
+                 // Note: Waiting here blocks the caller (Workflow). That loops per event. It's OK to wait a bit.
+                 // But indefinite wait is bad.
+                 // Let's simplified approach: If busy, we queue it? 
+                 // For now, let's just RETURN if busy to avoid cutting off the important achievement.
+                 // OR, better: Wait for it to finish?
+                 // Let's wait up to 10s.
+                 
+                 int retries = 0;
+                 while(isBusy && retries < 20) // 10s max
+                 {
+                     await Task.Delay(500);
+                     lock(_overlayLock) { isBusy = _isSequencePlaying; }
+                     retries++;
+                 }
+                 
+                 if (isBusy) return; // Gave up
+             }
+
+             try
+             {
+                 // EN: Generate scrolling text frames for RP
+                 // FR: Générer les frames de texte défilant pour RP
+                 bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                 if (_isNativeOpen && _dmdWrapper.IsLoaded)
+                 {
+                     var method = _dmdWrapper.RenderMethodName ?? "";
+                     if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
+                 }
+
+                  int targetH = heightOverride ?? (_config.DmdHeight / 2);
+                  int yPos = yOverride ?? ((_config.DmdHeight / 2) - 1);
+                  var textFrames = _imageService.GenerateDmdScrollingTextFrames(text, _config.DmdWidth, _config.DmdHeight, useGrayscale, yOffset: yPos, targetHeight: targetH, textColor: textColor, fontSizeParam: fontSize);
+                 
+                  if (textFrames != null && textFrames.Count > 0)
+                  {
+                      _rpFrames = textFrames;
+                      
+                      // EN: Ensure the RP loop is running / FR: S'assurer que la boucle RP tourne
+                     if (_rpLoopTask == null || _rpLoopTask.IsCompleted)
+                     {
+                         _rpLoopCts = new CancellationTokenSource();
+                         _rpLoopTask = RunRpLoopAsync(_rpLoopCts.Token);
+                     }
+                 }
+             }
+             catch (Exception ex)
+             {
+                 _logger.LogError($"[DMD] Error starting RP loop: {ex.Message}");
+             }
+        }
+
+        private async Task RunRpLoopAsync(CancellationToken token)
+        {
+            _logger.LogInformation("[DMD] RP Loop Started");
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    // EN: Check if we are busy with an achievement sequence
+                    // FR: Vérifier si on est occupé par une séquence de succès
+                    bool isBusy = false;
+                    lock(_overlayLock) { isBusy = _isSequencePlaying; }
+                    
+                    if (isBusy)
+                    {
+                        await Task.Delay(1000, token);
+                        continue;
+                    }
+
+                    List<byte[]>? currentFrames = _rpFrames;
+                    if (currentFrames == null || currentFrames.Count == 0)
+                    {
+                        await Task.Delay(1000, token);
+                        continue;
+                    }
+
+                    // EN: Play one full pass of the scroll (20ms for faster movement)
+                    // FR: Jouer un passage complet du défilement (20ms pour un mouvement plus rapide)
+                    // EN: We use the main loop token here to let the current pass finish before checking for new frames
+                    // FR: On utilise le token de boucle principal pour laisser la passe actuelle se finir avant de vérifier les nouvelles frames
+                    await AnimateOverlayAsync(currentFrames, 20, token);
+                    
+                    if (currentFrames.Count > 1)
+                    {
+                        // EN: If it was a scroll (multiple frames), stop after one pass until the next value update
+                        // FR: Si c'était un défilement (plusieurs frames), arrêter après un passage jusqu'à la prochaine mise à jour
+                        _rpFrames = null;
+                        ClearOverlay();
+                        continue;
+                    }
+
+                    // EN: Small pause at end of pass for static or single-frame items
+                    // FR: Petite pause à la fin du passage pour les items statiques
+                    await Task.Delay(300, token);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"[DMD] RP Loop Error: {ex.Message}");
+            }
+            _logger.LogInformation("[DMD] RP Loop Stopped");
+        }
+
+        public async Task PlayDmdStaticNotificationAsync(string text, int durationMs = 3000)
+        {
+             bool isBusy = false;
+             lock(_overlayLock) { isBusy = _isSequencePlaying; }
+             if (isBusy) 
+             {
+                 int retries = 0;
+                 while(isBusy && retries < 20) // 10s max
+                 {
+                     await Task.Delay(500);
+                     lock(_overlayLock) { isBusy = _isSequencePlaying; }
+                     retries++;
+                 }
+                 if (isBusy) return;
+             }
+
+             try
+             {
+                 bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                 if (_isNativeOpen && _dmdWrapper.IsLoaded)
+                 {
+                     var method = _dmdWrapper.RenderMethodName ?? "";
+                     if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
+                 }
+
+                 int halfHeight = _config.DmdHeight / 2;
+                 int yPos = halfHeight - 1;
+                 var frame = _imageService.GenerateDmdStaticTextFrame(text, _config.DmdWidth, _config.DmdHeight, useGrayscale, yOffset: yPos, targetHeight: halfHeight);
+                  if (frame != null)
+                  {
+                      _rpFrames = new List<byte[]> { frame };
+
+                      // EN: Ensure the RP loop is running / FR: S'assurer que la boucle RP tourne
+                     if (_rpLoopTask == null || _rpLoopTask.IsCompleted)
+                     {
+                         _rpLoopCts = new CancellationTokenSource();
+                         _rpLoopTask = RunRpLoopAsync(_rpLoopCts.Token);
+                     }
+                 }
+             }
+             catch (Exception ex)
+             {
+                 _logger.LogError($"[DMD] Error in PlayDmdStaticNotificationAsync: {ex.Message}");
+             }
+        }
+
+        public async Task PlayChallengeNotificationAsync(ChallengeState state, bool isHardcore = false, string? ribbonPath = null)
+        {
+             // EN: Check if an achievement sequence is currently playing
+             // FR: Vérifier si une séquence de succès est en cours
+             bool isBusy = false;
+             lock(_overlayLock) { isBusy = _isSequencePlaying; }
+
+             if (isBusy) return; // Priority to Unlock
+
+             if (!state.IsActive)
+             {
+                 // Challenge Ended -> Clear
+                 ClearOverlay();
+                 return;
+             }
+
+             // EN: Generate image for DMD (dynamic timer/count)
+             // FR: Générer image pour DMD (timer/compteur dynamique)
              bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
-             // Check native for grayscale hint
              if (_isNativeOpen && _dmdWrapper.IsLoaded)
              {
                  var method = _dmdWrapper.RenderMethodName ?? "";
                  if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
              }
 
-             var textFrames = _imageService.GenerateDmdScrollingTextFrames(text, _config.DmdWidth, _config.DmdHeight, useGrayscale);
+             var imagePath = _imageService.GenerateDmdChallengeImage(state, _config.DmdWidth, _config.DmdHeight, useGrayscale, isHardcore, ribbonPath);
              
-             if (textFrames != null && textFrames.Count > 0)
+             if (!string.IsNullOrEmpty(imagePath) && File.Exists(imagePath))
              {
-                 int frameDuration = 30; // ms
-                 int textAnimDuration = textFrames.Count * frameDuration;
-                 
-                 // Cap text animation if it's too long? Or let it play fast?
-                 // If total time is 10s, used 2s (cup), left 8s.
-                 // Ideally text takes 3-4s.
-                 // If text is long, it might take longer.
-                 
-                 await AnimateOverlayAsync(textFrames, frameDuration);
-             }
-
-             // 3. Show Badge (Remainder)
-             // Calculation: Total - 2000 - TextTime (approx)
-             // Actually SetOverlayAsync sets expiry relative to NOW.
-             // So we just set it for a reasonable time, e.g. 5000ms. 
-             // Workflow will naturally clear or it will expire.
-             
-             if (!string.IsNullOrEmpty(badgePath))
-             {
-                 await SetOverlayAsync(badgePath, 5000); // 5s final static
+                 // EN: Duration is long but it will be updated by the refresh loop in MarqueeWorkflow
+                 // FR: La durée est longue mais elle sera mise à jour par la boucle de rafraîchissement dans MarqueeWorkflow
+                 await SetOverlayAsync(imagePath, 3600000); // 1 hour persistent until clear
              }
         }
 
-        private async Task AnimateOverlayAsync(List<byte[]> frames, int frameDurationMs)
+        public async Task PlayFullPreviewAsync()
         {
-            foreach(var frame in frames)
+            try
             {
-                 // Check if overlay was cancelled/replaced? 
-                 // We rely on caller flow.
-                 
-                 // Fix for 16 shades
-                 bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
-                 // ... (re-check wrapper if needed, but frames are already generated with grayscale flag)
-                 // But wait, the 4-bit shift needs to happen if using Render_16_Shades logic dynamically?
-                 // Frames generated by GenerateDmdScrollingTextFrames call GetRawDmdBytes which does NOT shift?
-                 // DmdService usually shifts AFTER getting bytes.
-                 // Let's assume frames are raw 8-bit. We need to shift if needed.
-                 
-                 var bytes = frame;
-                 if (_isNativeOpen && _dmdWrapper.RenderMethodName?.Contains("16_Shades") == true && useGrayscale)
-                 {
-                     // Clone to avoid modifying cached list if reused? (List is local here)
-                     // But strictly, GetRawDmdBytes might return new array. 
-                     // Let's shift in place if we own the list.
-                      for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(bytes[i] >> 4);
-                 }
+                bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                if (_isNativeOpen && _dmdWrapper.IsLoaded)
+                {
+                    var method = _dmdWrapper.RenderMethodName ?? "";
+                    if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
+                }
 
-                 lock(_overlayLock)
-                 {
-                     _activeOverlayBytes = bytes;
-                     _overlayExpiry = DateTime.Now.AddMilliseconds(frameDurationMs + 50); // Buffer
-                 }
-                 
-                 // If static mode, force render
-                 if (_animationCts == null && _isNativeOpen)
-                 {
-                     // Force render static with overlay
-                     RenderStaticWithOverlay(useGrayscale); 
-                 }
+                var bytes = _imageService.GenerateDmdFullPreviewFrame(_config.DmdWidth, _config.DmdHeight, useGrayscale);
+                if (bytes != null && bytes.Length > 0)
+                {
+                    lock(_overlayLock)
+                    {
+                        _activeOverlayBytes = bytes;
+                        _overlayExpiry = DateTime.Now.AddSeconds(30); // Show preview for 30s
+                    }
 
-                 await Task.Delay(frameDurationMs);
+                    if (_animationCts == null && _isNativeOpen)
+                    {
+                        RenderStaticWithOverlay(useGrayscale); 
+                    }
+                    _logger.LogInformation("[DMD] Full Preview triggered.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[DMD] PlayFullPreviewAsync Error: {ex.Message}");
+            }
+            await Task.CompletedTask;
+        }
+
+        private async Task AnimateOverlayAsync(List<byte[]> frames, int frameDurationMs, CancellationToken token = default, bool isSequence = false)
+        {
+            for (int i = 0; i < frames.Count; i++)
+            {
+                if (token.IsCancellationRequested) return;
+
+                // EN: If a priority sequence is playing, stop RP animation / FR: Si une séquence prioritaire tourne, arrêter l'anim RP
+                if (!isSequence && _isSequencePlaying) return;
+
+                // Fix for 16 shades
+                bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                
+                var bytes = frames[i];
+                if (_isNativeOpen && _dmdWrapper.RenderMethodName?.Contains("16_Shades") == true && useGrayscale)
+                {
+                    // Copy to avoid modifying the source list if it's shared
+                    var tintedBytes = new byte[bytes.Length];
+                    Array.Copy(bytes, tintedBytes, bytes.Length);
+                    for (int j = 0; j < tintedBytes.Length; j++) tintedBytes[j] = (byte)(tintedBytes[j] >> 4);
+                    bytes = tintedBytes;
+                }
+
+                lock(_overlayLock)
+                {
+                    _activeOverlayBytes = bytes;
+                    // EN: If it's the last frame, keep it longer to cover the pause between passes/loops (default 1500ms)
+                    // FR: Si c'est la dernière frame, la garder plus longtemps pour couvrir la pause entre les passages (défaut 1500ms)
+                    int extraBuffer = (i == frames.Count - 1) ? 2000 : 50;
+                    _overlayExpiry = DateTime.Now.AddMilliseconds(frameDurationMs + extraBuffer);
+                }
+                
+                if (_animationCts == null && _isNativeOpen)
+                {
+                    RenderStaticWithOverlay(useGrayscale); 
+                }
+
+                await Task.Delay(frameDurationMs, token);
             }
         }
 
@@ -871,7 +1184,14 @@ namespace RetroBatMarqueeManager.Application.Services
                          useGrayscale = true;
                      }
                  }
-                 if (_config.GetSetting("DmdForceMono", "false") == "true") useGrayscale = true;
+                if (_config.GetSetting("DmdForceMono", "false") == "true") useGrayscale = true;
+
+                 // EN: Check for GIF (Animated Overlay)
+                 if (imagePath.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) && File.Exists(imagePath))
+                 {
+                     StartOverlayAnimation(imagePath, durationMs, useGrayscale);
+                     return;
+                 }
 
                  var bytes = await _imageService.GetRawDmdBytes(imagePath, _config.DmdWidth, _config.DmdHeight, useGrayscale);
                  
@@ -917,6 +1237,115 @@ namespace RetroBatMarqueeManager.Application.Services
                 _logger.LogError($"[DMD] Failed to set overlay: {ex.Message}");
             }
         }
+
+        private void StartOverlayAnimation(string imagePath, int durationMs, bool useGrayscale)
+        {
+            // Cancel previous overlay animation
+            _overlayAnimationCts?.Cancel();
+            _overlayAnimationCts = new CancellationTokenSource();
+            var token = _overlayAnimationCts.Token;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var frames = new List<(byte[] bytes, int delayMs)>();
+
+                    using (var gif = Image.FromFile(imagePath))
+                    {
+                        var dimension = new FrameDimension(gif.FrameDimensionsList[0]);
+                        int frameCount = gif.GetFrameCount(dimension);
+                        byte[]? delayBytes = null;
+                        try { delayBytes = gif.GetPropertyItem(0x5100)?.Value; } catch { }
+
+                        for (int i = 0; i < frameCount; i++)
+                        {
+                            if (token.IsCancellationRequested) return;
+                            gif.SelectActiveFrame(dimension, i);
+                            
+                            using (var frameBmp = new Bitmap(gif))
+                            {
+                                var bytes = _imageService.GetRawDmdBytes(frameBmp, _config.DmdWidth, _config.DmdHeight, useGrayscale);
+                                if (bytes != null)
+                                {
+                                    // Fix for Render_16_Shades (Native driver expects 4-bit)
+                                    if (useGrayscale && (_dmdWrapper.RenderMethodName?.Contains("16_Shades") == true))
+                                    {
+                                        for (int j = 0; j < bytes.Length; j++) bytes[j] = (byte)(bytes[j] >> 4);
+                                    }
+
+                                    int delay = 100;
+                                    if (delayBytes != null && delayBytes.Length >= (i + 1) * 4)
+                                        delay = BitConverter.ToInt32(delayBytes, i * 4) * 10;
+                                    
+                                    if (delay < 20) delay = 100; // Sanity check
+                                    frames.Add((bytes, delay));
+                                }
+                            }
+                        }
+                    }
+
+                    if (frames.Count == 0 || token.IsCancellationRequested) return;
+
+                    var startTime = DateTime.Now;
+                    var endTime = startTime.AddMilliseconds(durationMs);
+
+                    _logger.LogInformation($"[DMD Overlay] Starting animation loop ({frames.Count} frames) for {durationMs}ms");
+
+                    // Set Expiry for the lock logic
+                    lock (_overlayLock) { _overlayExpiry = endTime; }
+
+                    while (DateTime.Now < endTime && !token.IsCancellationRequested)
+                    {
+                        foreach (var frame in frames)
+                        {
+                            if (token.IsCancellationRequested || DateTime.Now >= endTime) break;
+
+                            lock (_overlayLock)
+                            {
+                                _activeOverlayBytes = frame.bytes;
+                            }
+
+                            // If main content is static, we must trigger a render here to show the overlay update
+                            if (_animationCts == null && _isNativeOpen)
+                            {
+                                RenderStaticWithOverlay(useGrayscale);
+                            }
+
+                            await Task.Delay(frame.delayMs, token);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"[DMD Overlay] Animation error: {ex.Message}");
+                }
+                finally
+                {
+                    // Clean up
+                    lock (_overlayLock)
+                    {
+                        // ensure we don't clear if a NEW overlay started
+                         if (!token.IsCancellationRequested) 
+                        {
+                            _activeOverlayBytes = null;
+                            // Trigger final render to clear
+                            if (_animationCts == null && _isNativeOpen) RenderStaticWithOverlay(useGrayscale);
+                        }
+                        else
+                        {
+                            // EN: Even if cancelled, if no new overlay was set (null), we must clear
+                            // FR: Même si annulé, si aucun nouvel overlay n'a été défini (null), on doit effacer
+                            if (_activeOverlayBytes == null && _animationCts == null && _isNativeOpen)
+                            {
+                                RenderStaticWithOverlay(useGrayscale);
+                            }
+                        }
+                    }
+                }
+            });
+        }
         
         /// <summary>
         /// EN: Clear active overlay immediately
@@ -928,8 +1357,26 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 _activeOverlayBytes = null;
                 _overlayExpiry = DateTime.MinValue;
+                _overlayAnimationCts?.Cancel();
+                _rpLoopCts?.Cancel();
+                _rpFrames = null;
             }
-            _logger.LogInformation("[DMD] Overlay cleared");
+            
+            // EN: Force immediate re-render to clear the screen physically
+            // FR: Forcer un re-rendu immédiat pour effacer l'écran physiquement
+            if (_animationCts == null && _isNativeOpen)
+            {
+                // Re-determine grayscale mode cleanly
+                bool useGrayscale = _config.GetSetting("DmdForceMono", "false") == "true";
+                 if (_isNativeOpen && _dmdWrapper.IsLoaded)
+                 {
+                     var method = _dmdWrapper.RenderMethodName ?? "";
+                     if (method.Contains("Gray") || method.Contains("16_Shades") || method.Contains("4_Shades")) useGrayscale = true;
+                 }
+                RenderStaticWithOverlay(useGrayscale);
+            }
+
+            _logger.LogInformation("[DMD] Overlay cleared and Render triggered");
         }
         
         private void RenderStaticWithOverlay(bool useGrayscale)
@@ -937,37 +1384,45 @@ namespace RetroBatMarqueeManager.Application.Services
              try
              {
                  byte[]? baseBytes = _currentStaticBytes;
-                 byte[]? overlay = _activeOverlayBytes;
+                 byte[]? overlay = null;
+                 byte[]? score = null;
+
+                 lock(_overlayLock)
+                 {
+                     if (_activeOverlayBytes != null && _overlayExpiry > DateTime.Now) overlay = _activeOverlayBytes;
+                 }
+                 lock(_scoreLock)
+                 {
+                     score = _persistentScoreBytes;
+                 }
                  
                  if (baseBytes == null) return; // Nothing to show?
                  
                  var bytesToSend = new byte[baseBytes.Length];
                  Array.Copy(baseBytes, bytesToSend, baseBytes.Length);
                  
+                 int step = useGrayscale ? 1 : 3;
+
+                 // 1. Composite Persistent Score first / FR: Composer d'abord le score persistant
+                 if (score != null && score.Length == bytesToSend.Length)
+                 {
+                     for (int k = 0; k < bytesToSend.Length; k += step)
+                     {
+                         bool isPixelNonBlack = false;
+                         for (int s = 0; s < step; s++) { if (k + s < score.Length && score[k + s] != 0) { isPixelNonBlack = true; break; } }
+                         if (isPixelNonBlack) { for (int s = 0; s < step; s++) { if (k + s < bytesToSend.Length) bytesToSend[k + s] = score[k + s]; } }
+                     }
+                 }
+
+                 // 2. Composite Temporary Notification on top / FR: Composer la notification temporaire par dessus
                  if (overlay != null && overlay.Length == bytesToSend.Length)
                  {
-                    // Composition Logic (Same as GIF loop)
-                    int step = useGrayscale ? 1 : 3;
-                    for (int k = 0; k < bytesToSend.Length; k += step)
-                    {
-                        bool isPixelNonBlack = false;
-                        for (int s = 0; s < step; s++)
-                        {
-                            if (k + s < overlay.Length && overlay[k + s] != 0)
-                            {
-                                isPixelNonBlack = true;
-                                break;
-                            }
-                        }
-
-                        if (isPixelNonBlack)
-                        {
-                             for (int s = 0; s < step; s++)
-                             {
-                                 if (k + s < bytesToSend.Length) bytesToSend[k + s] = overlay[k + s];
-                             }
-                        }
-                    }
+                     for (int k = 0; k < bytesToSend.Length; k += step)
+                     {
+                         bool isPixelNonBlack = false;
+                         for (int s = 0; s < step; s++) { if (k + s < overlay.Length && overlay[k + s] != 0) { isPixelNonBlack = true; break; } }
+                         if (isPixelNonBlack) { for (int s = 0; s < step; s++) { if (k + s < bytesToSend.Length) bytesToSend[k + s] = overlay[k + s]; } }
+                     }
                  }
                  
                  _dmdWrapper.Render((ushort)_config.DmdWidth, (ushort)_config.DmdHeight, bytesToSend);
@@ -1050,53 +1505,49 @@ namespace RetroBatMarqueeManager.Application.Services
 
                             byte[] bytesToSend = frame.bytes;
 
-                            // EN: Overlay Logic (Chroma Key Composition)
-                            // FR: Logique Overlay (Composition Chroma Key)
+                            // EN: Overlay Logic (Multi-layer Composition)
+                            // FR: Logique Overlay (Composition multi-couches)
                             byte[]? overlay = null;
+                            byte[]? score = null;
+                            
                             lock(_overlayLock)
                             {
-                                if (_activeOverlayBytes != null && _overlayExpiry > DateTime.Now)
-                                {
-                                    overlay = _activeOverlayBytes;
-                                }
-                                else if (_activeOverlayBytes != null)
-                                {
-                                    _activeOverlayBytes = null; // Expired
-                                }
+                                if (_activeOverlayBytes != null && _overlayExpiry > DateTime.Now) overlay = _activeOverlayBytes;
+                                else if (_activeOverlayBytes != null) _activeOverlayBytes = null; // Expired
+                            }
+                            lock(_scoreLock)
+                            {
+                                score = _persistentScoreBytes;
                             }
 
-                            if (overlay != null && overlay.Length == bytesToSend.Length)
+                            if ((overlay != null && overlay.Length == bytesToSend.Length) || (score != null && score.Length == bytesToSend.Length))
                             {
                                 // EN: Create temporary buffer for composition to avoid modifying cached frame
                                 // FR: Créer buffer temporaire pour éviter de modifier la frame en cache
                                 var composed = new byte[bytesToSend.Length];
                                 Array.Copy(bytesToSend, composed, bytesToSend.Length);
                                 
-                                // Chroma Key (Assume 0 = Black/Transparent)
-                                // EN: Handle RGB vs Gray properly to avoid channel mixing
-                                // FR: Gérer RGB vs Gray correctement pour éviter mélange de canaux
                                 int step = useGrayscale ? 1 : 3;
                                 
-                                for (int k = 0; k < composed.Length; k += step)
+                                // 1. Score Layer / FR: Couche Score
+                                if (score != null && score.Length == composed.Length)
                                 {
-                                    bool isPixelNonBlack = false;
-                                    // Check if any component of pixel is non-zero
-                                    for (int s = 0; s < step; s++)
+                                    for (int k = 0; k < composed.Length; k += step)
                                     {
-                                        if (k + s < overlay.Length && overlay[k + s] != 0)
-                                        {
-                                            isPixelNonBlack = true;
-                                            break;
-                                        }
+                                        bool isPixelNonBlack = false;
+                                        for (int s = 0; s < step; s++) { if (k + s < score.Length && score[k + s] != 0) { isPixelNonBlack = true; break; } }
+                                        if (isPixelNonBlack) { for (int s = 0; s < step; s++) { if (k + s < composed.Length) composed[k + s] = score[k + s]; } }
                                     }
+                                }
 
-                                    if (isPixelNonBlack)
+                                // 2. Notification Layer (On Top) / FR: Couche Notification (Au dessus)
+                                if (overlay != null && overlay.Length == composed.Length)
+                                {
+                                    for (int k = 0; k < composed.Length; k += step)
                                     {
-                                        // Copy full pixel
-                                        for (int s = 0; s < step; s++)
-                                        {
-                                            if (k + s < composed.Length) composed[k + s] = overlay[k + s];
-                                        }
+                                        bool isPixelNonBlack = false;
+                                        for (int s = 0; s < step; s++) { if (k + s < overlay.Length && overlay[k + s] != 0) { isPixelNonBlack = true; break; } }
+                                        if (isPixelNonBlack) { for (int s = 0; s < step; s++) { if (k + s < composed.Length) composed[k + s] = overlay[k + s]; } }
                                     }
                                 }
                                 bytesToSend = composed;

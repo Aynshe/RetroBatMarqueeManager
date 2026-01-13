@@ -7,9 +7,11 @@
     <UserSecretsId>dotnet-RetroBatMarqueeManager-d8a9514f-a3df-46f6-a788-ad0aa80d5d76</UserSecretsId>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>RetroBatMarqueeManager.App</AssemblyName>
-    <Version>1.0.0.0</Version>
-    <FileVersion>1.0.0.0</FileVersion>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Version>1.1.0-beta</Version>
+    <FileVersion>1.1.0.0</FileVersion>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <OutputPath>..\..\RetroBatMarqueeManager\bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -39,6 +41,10 @@
   <!-- Copier les ressources après le build -->
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
     <Exec Command="call &quot;$(ProjectDir)CopyResources.bat&quot; &quot;$(OutDir)&quot; &quot;$(ProjectDir)&quot;" />
+  </Target>
+
+  <Target Name="ForceCleanOutput" AfterTargets="Clean">
+    <RemoveDir Directories="$(OutputPath)" />
   </Target>
 
 </Project>
