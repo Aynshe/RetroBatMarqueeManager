@@ -14,6 +14,8 @@ Original Project: [https://github.com/Nelfe80/MarqueeManager](https://github.com
 
 ## Configuration Menu
 
+<a href="https://www.youtube.com/watch?v=-SxaogDx09s&t=180" target="_blank"><img src="https://github.com/user-attachments/assets/700b2c01-be18-46a3-be52-29abadbedd52" alt="RetroBatMarqueeManager"></a>
+
 You can access the configuration interface in two ways:
 
 1.  **From System Tray**: Right-click the RetroBat Marquee Manager icon in the taskbar and select **Configuration**.
