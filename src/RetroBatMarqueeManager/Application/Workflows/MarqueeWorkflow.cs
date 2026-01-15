@@ -1622,47 +1622,6 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 });
 
                 await Task.WhenAll(mpvTask, dmdTask);
-
-                // 3. Post-Notification Overlays & Cycle Restart
-                // EN: Only restart cycles if NO more achievements are pending in the burst
-                // FR: Ne redémarrer les cycles que si PLUS AUCUN succès n'est en attente dans la rafale
-                if (_gameRunning && _activeAchievementCount == 0 && _raService != null && _raService.CurrentGameId.HasValue)
-                {
-                    var achievements = _raService.CurrentGameAchievements;
-                    if (achievements != null && achievements.Count > 0)
-                    {
-                        // MPV Restart
-                        if (!string.IsNullOrEmpty(mpvOverlaysStr))
-                        {
-                             if (mpvOverlaysStr.Contains("badges", StringComparison.OrdinalIgnoreCase))
-                                 StartMpvBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements, _raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints);
-                             else
-                                 await RefreshPersistentMpvOverlays();
-                        }
-
-                        // DMD Restart
-                        if (!string.IsNullOrEmpty(dmdOverlaysStr))
-                        {
-                            var dmdActive = dmdOverlaysStr.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(o => o.Trim());
-                            if (dmdActive.Contains("badges", StringComparer.OrdinalIgnoreCase))
-                                StartBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements);
-                            else
-                            {
-                                if (dmdActive.Contains("count", StringComparer.OrdinalIgnoreCase))
-                                {
-                                    int unlocked = achievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
-                                    var countFile = _imageService.GenerateAchievementCountOverlay(unlocked, achievements.Count, isDmd: true, isHardcore: isHc);
-                                    if (File.Exists(countFile)) { await _dmdService.SetOverlayAsync(countFile, 5000); await Task.Delay(5000); }
-                                }
-                                if (dmdActive.Contains("score", StringComparer.OrdinalIgnoreCase))
-                                {
-                                    var scoreFile = _imageService.GenerateScoreOverlay(_raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints, isDmd: true, isHardcore: isHc);
-                                    if (File.Exists(scoreFile)) await _dmdService.SetOverlayAsync(scoreFile, 5000);
-                                }
-                            }
-                        }
-                    }
-                }
             }
             catch (Exception ex)
             {
@@ -1675,6 +1634,31 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 {
                     _isProcessingAchievement = false;
                     _logger.LogInformation("[RA Workflow] All achievements processed. RP and Cycles restored.");
+                    
+                    // EN: Restart cycles with updated values now that all achievements are processed
+                    // FR: Redémarre les cycles avec les valeurs mises à jour maintenant que tous les achievements sont traités
+                    if (_gameRunning && _raService != null && _raService.CurrentGameId.HasValue)
+                    {
+                        var achievements = _raService.CurrentGameAchievements;
+                        if (achievements != null && achievements.Count > 0)
+                        {
+                            _logger.LogInformation($"[RA Workflow] Restarting cycles with updated values: {_raService.CurrentGameUserPoints}/{_raService.CurrentGameTotalPoints}");
+                            
+                            // MPV Restart
+                            var mpvOverlays = _config.MpvRetroAchievementsOverlays;
+                            if (!string.IsNullOrEmpty(mpvOverlays) && mpvOverlays.Contains("badges", StringComparison.OrdinalIgnoreCase))
+                            {
+                                StartMpvBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements, _raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints);
+                            }
+
+                            // DMD Restart
+                            var dmdOverlays = _config.DmdRetroAchievementsOverlays;
+                            if (!string.IsNullOrEmpty(dmdOverlays) && dmdOverlays.Contains("badges", StringComparison.OrdinalIgnoreCase))
+                            {
+                                StartBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2667,13 +2651,14 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
                     if (!string.IsNullOrWhiteSpace(currentState.Narrative) && currentState.IsNarrativeChanged(_lastRpState))
                     {
-                        var mpvNarrativePath = await _imageService.GenerateRichPresenceOverlay(currentState.Narrative, isHc, _config.MarqueeWidth, _config.MarqueeHeight, position: "center");
-                        if (File.Exists(mpvNarrativePath))
+                        var narrationResult = await _imageService.GenerateRichPresenceOverlay(currentState.Narrative, isHc, _config.MarqueeWidth, _config.MarqueeHeight, position: "center");
+                        if (narrationResult.IsValid && File.Exists(narrationResult.Path))
                         {
-                            await _mpv.OverlayImage(mpvNarrativePath, 4);
-                            // EN: Increased delay from 8s to 15s to ensure long scrolling GIFs finish
-                            // FR: Augmentation du délai de 8s à 15s pour garantir que les longs GIFs défilants se terminent
-                            _ = Task.Delay(15000).ContinueWith(_ => _mpv.RemoveOverlay(4, false));
+                            await _mpv.OverlayImage(narrationResult.Path, 4, $"{narrationResult.X}:{narrationResult.Y}");
+                            // EN: Use calculated GIF duration + buffer if available, or default to 15s
+                            // FR: Utiliser la durée calculée du GIF + buffer si disponible, ou défaut à 15s
+                            int delay = (narrationResult.DurationMs > 0) ? narrationResult.DurationMs : 15000;
+                            _ = Task.Delay(delay).ContinueWith(_ => _mpv.RemoveOverlay(4, false));
                         }
                     }
                 }
@@ -2903,10 +2888,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     var t13 = Task.Run<string>(() => _imageService.GenerateRichPresenceItemOverlay("Rank", "Pos 1/12", true, width, height, false, false, "top-right", 120, true, token), token);
 
                     // Wait for all
-                    // Wait for all
                     try 
                     {
-                        await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13);
+                        await Task.WhenAll(new Task[] { t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13 });
                     }
                     catch (Exception ex)
                     {
@@ -2938,11 +2922,16 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     // Apply Overlays Sequentially (Robustly)
                     // Helper to get result safe
                     string? GetResultOrNull(Task<string> t) => (t.Status == TaskStatus.RanToCompletion) ? t.Result : null;
+                    OverlayResult? GetOverlayResultOrNull(Task<OverlayResult> t) => (t.Status == TaskStatus.RanToCompletion) ? t.Result : null;
 
                     await SafeOverlay(GetResultOrNull(t1), 1);
                     await SafeOverlay(GetResultOrNull(t2), 2);
                     await SafeOverlay(GetResultOrNull(t3), 3);
-                    await SafeOverlay(GetResultOrNull(t4), 4);
+                    
+                    var narrationRes = GetOverlayResultOrNull(t4);
+                    if (narrationRes != null && narrationRes.IsValid)
+                        await _mpv.OverlayImage(narrationRes.Path, 4, $"{narrationRes.X}:{narrationRes.Y}");
+
                     await SafeOverlay(GetResultOrNull(t5), 5);
                     await SafeOverlay(GetResultOrNull(t6), 6);
                     await SafeOverlay(GetResultOrNull(t7), 7);

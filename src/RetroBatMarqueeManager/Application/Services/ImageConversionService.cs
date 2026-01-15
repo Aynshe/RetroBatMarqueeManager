@@ -3662,13 +3662,15 @@ namespace RetroBatMarqueeManager.Application.Services
         /// EN: Generate an overlay image for Rich Presence text (Emoji aware if possible)
         /// FR: GÃ©nÃ©rer une image d'overlay pour le texte Rich Presence (conscient des Emojis si possible)
         /// </summary>
-        public async Task<string> GenerateRichPresenceOverlay(string text, bool isHardcore, int width = 1920, int height = 360, string? backgroundPath = null, string position = "center", bool forceRegenerate = false, CancellationToken token = default)
+        public async Task<OverlayResult> GenerateRichPresenceOverlay(string text, bool isHardcore, int width = 1920, int height = 360, string? backgroundPath = null, string position = "center", bool forceRegenerate = false, CancellationToken token = default)
         {
             try
             {
                 text = CleanRichPresenceString(text, false); // Keep emojis for MPV image generation
+                
+                var result = new OverlayResult { Width = width, Height = height };
 
-                if (string.IsNullOrWhiteSpace(text)) return string.Empty; // Nothing to show
+                if (string.IsNullOrWhiteSpace(text)) return result; // Nothing to show
 
                 // Cache dir
                 string overlayFolder = isHardcore ? "hc_overlays" : "overlays";
@@ -3724,7 +3726,7 @@ namespace RetroBatMarqueeManager.Application.Services
 
                         if (overlay != null)
                         {
-                            if (!overlay.IsEnabled) return string.Empty;
+                            if (!overlay.IsEnabled) return result;
                             boxX = overlay.X;
                             boxY = overlay.Y;
                             boxW = overlay.Width;
@@ -3771,6 +3773,10 @@ namespace RetroBatMarqueeManager.Application.Services
                         }
 
                         if (!IsFontInstalled(raFontFamily)) raFontFamily = "Arial";
+                        
+                        // EN: Ensure fontSize is valid to avoid emSize exception
+                        // FR: S'assurer que fontSize est valide pour éviter l'exception emSize
+                        if (fontSize <= 0) fontSize = 10;
 
                         using (var font = new Font(raFontFamily, fontSize, FontStyle.Bold))
                         {
@@ -3795,9 +3801,9 @@ namespace RetroBatMarqueeManager.Application.Services
                             
                             if (trueSize.Width > boxW - 20)
                             {
-                                string gifPath = await GenerateFullscreenScrollingGif(text, font, width, height, new RectangleF(boxX, boxY, boxW, boxH), backgroundPath, bgColor, textColor, isHardcore, token);
-                                _logger.LogInformation($"[RP Debug] GIF Path: {gifPath}");
-                                if (!string.IsNullOrEmpty(gifPath)) return gifPath;
+                                var gifResult = await GenerateFullscreenScrollingGif(text, font, width, height, new RectangleF(boxX, boxY, boxW, boxH), backgroundPath, bgColor, textColor, isHardcore, token);
+                                _logger.LogInformation($"[RP Debug] GIF Path: {gifResult.Path} at {gifResult.X}:{gifResult.Y}");
+                                return gifResult;
                             }
 
                             var textSize = g.MeasureString(text, font, new SizeF(boxW - 20, boxH - 10), format);
@@ -3830,18 +3836,15 @@ namespace RetroBatMarqueeManager.Application.Services
                     bitmap.Save(targetPath, ImageFormat.Png);
                 }
 
-                // Cleanup periodically
-                if (DateTime.Now.Second % 30 == 0)
-                {
-                     _ = Task.Run(() => CleanupOldOverlays(cacheDir));
-                }
-
-                return targetPath;
+                result.Path = targetPath;
+                result.X = 0;
+                result.Y = 0; // PNG are still fullscreen for now to keep it simple
+                return result;
             }
             catch (Exception ex)
             {
                 _logger.LogError($"[ImageConversion] Failed to generate RP overlay: {ex.Message}");
-                return string.Empty;
+                return new OverlayResult();
             }
         }
 
@@ -5050,7 +5053,7 @@ namespace RetroBatMarqueeManager.Application.Services
             }
             catch { return defaultColor; }
         }
-        private async Task<string> GenerateFullscreenScrollingGif(string text, Font font, int width, int height, RectangleF boxRect, string? backgroundPath, Color boxColor, Color textColor, bool isHardcore, CancellationToken token = default)
+        private async Task<OverlayResult> GenerateFullscreenScrollingGif(string text, Font font, int width, int height, RectangleF boxRect, string? backgroundPath, Color boxColor, Color textColor, bool isHardcore, CancellationToken token = default)
         {
             Image? bgImage = null;
                 if (!string.IsNullOrEmpty(backgroundPath) && File.Exists(backgroundPath))
@@ -5058,21 +5061,45 @@ namespace RetroBatMarqueeManager.Application.Services
                     try { bgImage = Image.FromFile(backgroundPath); } catch { }
                 }
 
-                // EN: Check if we already have a cached GIF for this exact text and settings
-                // FR: Vérifier si on a déjà un GIF en cache pour ce texte et ces paramètres exacts
+                // EN: If no background, we can generate a small GIF for the specific box area to save MPV CPU
+                // FR: Si pas de fond, on génère un petit GIF spécifique à la zone pour économiser le CPU MPV
+                bool isPartial = (bgImage == null);
+                int gifW = isPartial ? (int)boxRect.Width : width;
+                int gifH = isPartial ? (int)boxRect.Height : height;
+                int offsetX = isPartial ? (int)boxRect.X : 0;
+                int offsetY = isPartial ? (int)boxRect.Y : 0;
+
+                // Adjust boxRect for drawing relative to the GIF canvas
+                RectangleF drawBoxRect = isPartial ? new RectangleF(0, 0, boxRect.Width, boxRect.Height) : boxRect;
+
                 string safeText = Sanitize(text);
-                if (safeText.Length > 30) safeText = safeText.Substring(0, 30);
+                if (safeText.Length > 25) safeText = safeText.Substring(0, 25);
                 string subFolder = isHardcore ? "hc_overlays" : "overlays";
                 
-                // Use hash of full text and params to ensure uniqueness even if sanitized text is same
-                int configHash = $"{text}_{width}_{height}_{boxRect.X}_{boxRect.Y}_{boxRect.Width}_{boxRect.Height}_{boxColor.ToArgb()}_{textColor.ToArgb()}_{backgroundPath}".GetHashCode();
+                int configHash = $"{text}_{gifW}_{gifH}_{boxRect.Width}_{boxColor.ToArgb()}_{textColor.ToArgb()}_{backgroundPath}".GetHashCode();
                 string cachedGifPath = Path.Combine(_config.CachePath, subFolder, $"rp_narration_{safeText}_{configHash}.gif");
+
+                var result = new OverlayResult { Path = cachedGifPath, X = offsetX, Y = offsetY, Width = gifW, Height = gifH };
 
                 if (File.Exists(cachedGifPath))
                 {
-                    _logger.LogInformation($"[GIF Debug] Returning cached GIF for: {text}");
+                    _logger.LogInformation($"[GIF Cache] HIT: {Path.GetFileName(cachedGifPath)} at {offsetX}:{offsetY}");
+                    
+                    // EN: Recalculate duration even on cache hit (we don't store metadata separately yet)
+                    // FR: Recalculer la durée même en cas de cache hit
+                     using (var dummyBmp = new Bitmap(1, 1))
+                     using (var g = Graphics.FromImage(dummyBmp))
+                     {
+                         var fontToMeasure = font ?? new Font("Arial", 16); // Fallback if font null (shouldn't happen here but safe)
+                         var textSize = g.MeasureString(text, fontToMeasure);
+                         int speed = 18;
+                         int frames = (int)((boxRect.Width + textSize.Width) / speed) + 30;
+                         if (frames > 300) { speed = 25; frames = (int)((boxRect.Width + textSize.Width) / speed) + 30; }
+                         result.DurationMs = (frames * 50) + 1000;
+                     }
+                    
                     bgImage?.Dispose();
-                    return cachedGifPath;
+                    return result;
                 }
 
                 // EN: Lock to ensure only one FFmpeg process runs at a time for GIF generation
@@ -5084,10 +5111,10 @@ namespace RetroBatMarqueeManager.Application.Services
                     if (File.Exists(cachedGifPath))
                     {
                         bgImage?.Dispose();
-                        return cachedGifPath;
+                        return result;
                     }
 
-                    int speed = 12;
+                    int speed = 18; // Increased from 12 to maintain visual speed (360px/s) at 20fps
                 float textWidth = 0;
                 using (var dummyBmp = new Bitmap(1, 1))
                 using (var g = Graphics.FromImage(dummyBmp))
@@ -5096,13 +5123,23 @@ namespace RetroBatMarqueeManager.Application.Services
                      textWidth = textSize.Width;
                 }
 
-                // Initial calculation of frames
+                // Initial calculation of frames (at 20fps)
                 // Logic: Scroll from Right edge of BOX to Left edge of BOX
-                int totalFrames = (int)((boxRect.Width + textWidth) / speed) + 50; 
+                int totalFrames = (int)((boxRect.Width + textWidth) / speed) + 30; 
+                
+                // EN: Set approximate duration (50ms per frame at 20fps + 1s buffer)
+                // FR: Définir durée approximative (50ms par frame à 20fps + 1s buffer)
+                result.DurationMs = (totalFrames * 50) + 1000; 
                     
                 // Cap frames to avoid huge files if text is extremely long, but allow enough for scrolling
                 // FR: Limiter les frames
-                if (totalFrames > 400) { speed = 12; totalFrames = (int)((boxRect.Width + textWidth) / speed) + 50; }
+                // Cap frames to avoid huge files if text is extremely long, but allow enough for scrolling
+                // FR: Limiter les frames
+                if (totalFrames > 300) { 
+                    speed = 25; 
+                    totalFrames = (int)((boxRect.Width + textWidth) / speed) + 30; 
+                    result.DurationMs = (totalFrames * 50) + 1000; // Recalculate duration
+                }
 
                 _logger.LogInformation($"[GIF Debug] Starting GIF Generation (Speed: {speed}, Frames: {totalFrames}, Filter: PaletteGen)");
 
@@ -5111,7 +5148,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 if (string.IsNullOrEmpty(ffmpegPath)) 
                 {
                      bgImage?.Dispose();
-                     return string.Empty;
+                     return result;
                 }
 
                 string subFolder_inner = isHardcore ? "hc_overlays" : "overlays";
@@ -5125,7 +5162,7 @@ namespace RetroBatMarqueeManager.Application.Services
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = ffmpegPath,
-                    Arguments = $"-y -f image2pipe -framerate 30 -i - -filter_complex \"[0:v] split [a][b];[a] palettegen=reserve_transparent=1 [p];[b][p] paletteuse\" -loop 0 \"{gifPath}\"",
+                    Arguments = $"-y -f image2pipe -framerate 20 -i - -filter_complex \"[0:v] split [a][b];[a] palettegen=reserve_transparent=1 [p];[b][p] paletteuse\" -loop 0 \"{gifPath}\"",
                     RedirectStandardInput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -5138,12 +5175,12 @@ namespace RetroBatMarqueeManager.Application.Services
                 {
                     _logger.LogError("Failed to start FFmpeg process.");
                     bgImage?.Dispose();
-                    return string.Empty;
+                    return result;
                 }
 
                 // Write frames to stdin
                 using (var stdin = process.StandardInput.BaseStream)
-                using (Bitmap frame = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                using (Bitmap frame = new Bitmap(gifW, gifH, PixelFormat.Format32bppArgb))
                 using (Graphics gf = Graphics.FromImage(frame))
                 {
                     gf.SmoothingMode = SmoothingMode.AntiAlias;
@@ -5160,7 +5197,7 @@ namespace RetroBatMarqueeManager.Application.Services
                             if (token.IsCancellationRequested)
                             {
                                 try { process.Kill(); } catch { }
-                                return string.Empty;
+                                return result;
                             }
                             gf.Clear(Color.Transparent); // Clear frame with transparency
 
@@ -5173,18 +5210,18 @@ namespace RetroBatMarqueeManager.Application.Services
                             // 2. Draw Box Background
                             if (boxColor.A > 0)
                             {
-                                gf.FillRectangle(brushBox, boxRect);
+                                gf.FillRectangle(brushBox, drawBoxRect);
                             }
 
                             // 3. Draw Scrolling Text with Clipping
-                            gf.SetClip(boxRect);
+                            gf.SetClip(drawBoxRect);
 
                             // Calculate X position
                             // Start slightly inside (Right - 20) to appear faster
-                            float currentX = (boxRect.Right - 20) - (i * speed);
+                            float currentX = (drawBoxRect.Right - 20) - (i * speed);
 
                             // Use a generous width to prevent any word wrap clipping
-                            RectangleF drawRect = new RectangleF(currentX, boxRect.Y, textWidth + 100, boxRect.Height);
+                            RectangleF drawRect = new RectangleF(currentX, drawBoxRect.Y, textWidth + 100, drawBoxRect.Height);
 
                             // Shadow
                             var shadowRect = drawRect;
@@ -5215,12 +5252,12 @@ namespace RetroBatMarqueeManager.Application.Services
                 if (bgImage != null) bgImage.Dispose();
 
 
-                return File.Exists(gifPath) ? gifPath : string.Empty;
+                return result;
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Failed to generate fullscreen scrolling GIF: {ex.Message}");
-                return string.Empty;
+                _logger.LogError($"Failed to generate scrolled GIF: {ex.Message}");
+                return new OverlayResult();
             }
             finally
             {

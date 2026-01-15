@@ -68,6 +68,11 @@ namespace RetroBatMarqueeManager.Application.Services
         // EN: Track achievements unlocked during this session to prevent over-counting from multiple logs or "already unlocked" lines
         // FR: Suivre les succès débloqués durant cette session pour éviter le sur-comptage via logs multiples ou lignes "already unlocked"
         private readonly HashSet<int> _unlockedInSession = new();
+        
+        // EN: Preserve session unlocks across false "Game Unload/Load" cycles (common in DuckStation/PCSX2)
+        // FR: Préserver les déblocages de session à travers les faux cycles "Déchargement/Chargement" (fréquent sur DuckStation/PCSX2)
+        private readonly Dictionary<int, HashSet<int>> _preservedSessionUnlocks = new();
+        
         private readonly object _achievementLock = new(); // EN: Lock for thread-safe achievement processing / FR: Verrou pour traitement thread-safe des succès
 
         // EN: Generalized regex patterns to support multiple emulators (prefix flexible)
@@ -1345,12 +1350,25 @@ namespace RetroBatMarqueeManager.Application.Services
             _logger.LogInformation($"[RA Service] Resetting state... (EmulatorHint: {emulatorHint ?? "None"})");
             bool wasRunning = _currentGameId.HasValue;
             
+            // EN: Save ID before resetting for unlock preservation logic
+            // FR: Sauvegarder l'ID avant réinitialisation pour la logique de préservation des déblocages
+            int? prevGameId = _currentGameId;
+            
             _currentGameId = null;
             _currentProgress = null;
             _isHardcoreMode = CheckHardcoreSettings(emulatorHint);
             _richPresenceUpdateCount = 0;
+
             lock (_achievementLock)
             {
+                // EN: Backup session unlocks before clearing, in case this is a false unload (re-load of same game)
+                // FR: Sauvegarder les déblocages de session avant effacement, au cas où c'est un faux déchargement (rechargement du même jeu)
+                if (wasRunning && prevGameId.HasValue && _unlockedInSession.Count > 0)
+                {
+                    _preservedSessionUnlocks[prevGameId.Value] = new HashSet<int>(_unlockedInSession);
+                    _logger.LogInformation($"[RA Service] Preserved {_unlockedInSession.Count} session unlocks for game {prevGameId.Value}");
+                }
+                
                 _unlockedInSession.Clear();
             }
 
@@ -1488,6 +1506,33 @@ namespace RetroBatMarqueeManager.Application.Services
                     UserProgress = progress,
                     IsHardcore = _isHardcoreMode
                 });
+                
+                // EN: Restore preserved session unlocks if any (Fix for Score Revert bug)
+                // FR: Restaurer les déblocages de session préservés s'il y en a (Correctif pour le bug de retour en arrière du score)
+                if (_preservedSessionUnlocks.ContainsKey(gameId))
+                {
+                    lock (_achievementLock)
+                    {
+                        var preserved = _preservedSessionUnlocks[gameId];
+                        _logger.LogInformation($"[RA Service] Restoring {preserved.Count} preserved local unlocks for game {gameId}");
+                        
+                        foreach (var achId in preserved)
+                        {
+                            _unlockedInSession.Add(achId);
+                            if (progress?.Achievements != null && progress.Achievements.TryGetValue(achId.ToString(), out var ach))
+                            {
+                                if (!ach.Unlocked)
+                                {
+                                    ach.Unlocked = true;
+                                    if (_isHardcoreMode) ach.DateEarnedHardcore = DateTime.Now;
+                                    else ach.DateEarned = DateTime.Now;
+                                }
+                            }
+                        }
+                        // Clean up
+                        _preservedSessionUnlocks.Remove(gameId);
+                    }
+                }
             }
             catch (Exception ex)
             {

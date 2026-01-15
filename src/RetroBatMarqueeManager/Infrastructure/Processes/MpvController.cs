@@ -99,6 +99,10 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
                 if (!string.IsNullOrEmpty(hwDec) && !hwDec.Equals("no", StringComparison.OrdinalIgnoreCase))
                 {
                     CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "hwdec-codecs", "all"));
+                    // EN: Use fast decoding for older CPUs (libmpv v2 context)
+                    // FR: Utiliser le décodage rapide pour les anciens CPU (contexte libmpv v2)
+                    CheckError(LibMpvNative.mpv_set_option_string(_mpvHandle, "vd-lavc-fast", "yes"));
+                    _logger.LogInformation("[MPV] Applied vd-lavc-fast=yes for performance optimization");
                 }
                 _logger.LogInformation($"[MPV] HW Usage: {hwDec}");
                 
@@ -446,12 +450,26 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
 
                 // 2. Add new overlay
                 string overlayPosition;
-                if (position == "bottom-left") overlayPosition = "0:main_h-overlay_h";
+                if (position.Contains(":")) overlayPosition = position; // Custom X:Y
+                else if (position == "bottom-left") overlayPosition = "0:main_h-overlay_h";
                 else if (position == "top-left") overlayPosition = "0:0";
+                else if (position == "center") overlayPosition = "(main_w-overlay_w)/2:(main_h-overlay_h)/2";
                 else overlayPosition = "main_w-overlay_w-20:20"; // top-right with margin
                 
-                // Create filter graph that scales input video to marquee size and overlays the image
-                var filterGraph = $"[in]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}:(iw-ow)/2:(ih-oh)/2[bg];movie=\\'{safePath}\\'[logo];[bg][logo]overlay={overlayPosition}[out]";
+                // EN: Optimized Filter: Avoid scale/crop of the background video [in] to save massive CPU/GPU on older hw.
+                // FR: Filtre optimisé : Éviter le scale/crop de la vidéo de fond [in] pour économiser énormément de CPU/GPU sur vieux matériel.
+                // We overlay directly on [in].
+                
+                // EN: REMOVED Forced loop=0. It caused freezes (on GIFs) and High CPU (on PNGs). 
+                // We rely on the media file itself being properly generated with loop metadata (which we do for Scrolling GIFs).
+                // FR: SUPPRIMÉ loop=0 forcé. Causait des figeages (GIFs) et CPU élevé (PNGs).
+                // On se fie aux métadonnées du fichier (ce que l'on fait pour les GIFs défilants).
+
+                var filterGraph = $"movie=\\'{safePath}\\'[logo];[in][logo]overlay={overlayPosition}[out]";
+
+                // EN: Ensure player is not paused (can happen with some static image loops)
+                // FR: S'assurer que le lecteur n'est pas en pause
+                LibMpvNative.mpv_set_property_string(_mpvHandle, "pause", "no");
 
                 var commandArg = $"{label}:lavfi=[{filterGraph}]";
                 if (id == 4 || id == 3) _logger.LogInformation($"[MpvController] Adding persistent overlay {id}: {commandArg}");
