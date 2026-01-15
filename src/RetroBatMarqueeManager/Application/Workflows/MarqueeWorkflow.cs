@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System;
 using Microsoft.Extensions.Logging;
@@ -137,19 +138,22 @@ namespace RetroBatMarqueeManager.Application.Workflows
         }
 
         private bool _isProcessingAchievement = false; // EN: Flag to suppress RP during achievement sequences / FR: Flag pour supprimer RP pendant séquences succès
+        private int _activeAchievementCount = 0; // EN: Track number of achievements being processed / FR: Suivre le nombre de succès en cours de traitement
+        private readonly SemaphoreSlim _dmdNotificationSemaphore = new(1, 1); // EN: Serialize DMD achievment overlays / FR: Sérialiser les overlays de succès DMD
 
         private void OnAchievementDetected(object? sender, EventArgs e)
         {
+            Interlocked.Increment(ref _activeAchievementCount);
             if (!_isProcessingAchievement)
             {
-                _logger.LogInformation("[RA Workflow] Achievement detected! Suppressing RP updates temporarily.");
+                _logger.LogInformation($"[RA Workflow] Achievement detected! (Active: {_activeAchievementCount}). Suppressing RP updates.");
                 _isProcessingAchievement = true;
                 
                 // EN: Safety timeout to reset flag in case event/sequence fails
                 // FR: Timeout de sécurité pour reset le flag si l'événement/la séquence échoue
-                _ = Task.Delay(15000).ContinueWith(_ => 
+                _ = Task.Delay(20000).ContinueWith(_ => 
                 {
-                    if (_isProcessingAchievement)
+                    if (_isProcessingAchievement && _activeAchievementCount == 0)
                     {
                         _isProcessingAchievement = false;
                         _logger.LogWarning("[RA Workflow] Achievement processing flag timed out - RP restored.");
@@ -1527,67 +1531,49 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 _logger.LogInformation($"[RA Workflow] Achievement Unlocked: {e.Achievement.Title} ({e.Achievement.Points} pts)");
                 
                 // EN: Badge path is already local (downloaded by API client)
-                // FR: Chemin du badge est déjà local (téléchargé par client API)
                 var badgePath = e.Achievement.BadgeName;
-                
                 if (string.IsNullOrEmpty(badgePath) || !File.Exists(badgePath))
                 {
                     _logger.LogWarning($"[RA Workflow] Badge not found: {badgePath}");
                     return;
                 }
 
-                // EN: Get RA Config early for filtering
-                var target = _config.MarqueeRetroAchievementsDisplayTarget; // dmd, mpv, both
+                // Configuration shortcuts
+                var target = _config.MarqueeRetroAchievementsDisplayTarget;
                 var mpvNotifications = _config.MpvRetroAchievementsNotifications;
                 var dmdNotifications = _config.DmdRetroAchievementsNotifications;
-                var mpvOverlays = _config.MpvRetroAchievementsOverlays;
-                var dmdOverlays = _config.DmdRetroAchievementsOverlays;
-                
-                // Cup Path logic
+                var mpvOverlaysStr = _config.MpvRetroAchievementsOverlays;
+                var dmdOverlaysStr = _config.DmdRetroAchievementsOverlays;
                 var cupPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "medias", "retroachievements", "biggoldencup.png");
                 
-                // EN: Generate MPV Overlay (Badge + Title + Desc + Points) with score if enabled
-                // FR: Générer l'overlay MPV (Badge + Titre + Desc + Points) avec score si activé
+                // Consistency flags
+                int currentPoints = _raService?.CurrentGameUserPoints ?? 0;
+                int totalPoints = _raService?.CurrentGameTotalPoints ?? 0;
+                bool isHc = _raService?.IsHardcoreMode ?? false;
+
+                // 1. Prepare MPV Overlay
                 var mpvAchOverlay = _imageService.GenerateMpvAchievementOverlay(badgePath, e.Achievement.Title, e.Achievement.Description, e.Achievement.Points, e.IsHardcore);
-                if (string.IsNullOrEmpty(mpvAchOverlay)) mpvAchOverlay = badgePath; // Fallback
+                if (string.IsNullOrEmpty(mpvAchOverlay)) mpvAchOverlay = badgePath;
                 
-                // EN: Compose achievement overlay with score (and HC status) for continuity if enabled
-                // FR: Composer l'overlay achievement avec score (et statut HC) pour continuité si activé
-                int current = _raService?.CurrentGameUserPoints ?? 0;
-                int total = _raService?.CurrentGameTotalPoints ?? 0;
-                var isHc = _raService?.IsHardcoreMode ?? false;
+                string? mpvScoreOverlay = null;
+                if (!string.IsNullOrEmpty(mpvOverlaysStr) && mpvOverlaysStr.Contains("score", StringComparison.OrdinalIgnoreCase))
+                    mpvScoreOverlay = _imageService.GenerateScoreOverlay(currentPoints, totalPoints, isDmd: false, isHardcore: isHc);
                 
-                string? scoreOverlay = null;
-                if (mpvOverlays.Contains("score", StringComparison.OrdinalIgnoreCase))
-                {
-                    scoreOverlay = _imageService.GenerateScoreOverlay(current, total, isDmd: false, isHardcore: isHc);
-                }
-                
-                var mpvOverlay = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, null, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: isHc);
-                if (string.IsNullOrEmpty(mpvOverlay)) mpvOverlay = mpvAchOverlay; // Fallback
+                var mpvMainOverlay = _imageService.ComposeScoreAndBadges(mpvScoreOverlay, mpvAchOverlay, null, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: isHc);
+                if (string.IsNullOrEmpty(mpvMainOverlay)) mpvMainOverlay = mpvAchOverlay;
 
-                // EN: Process Badge and Cup for DMD (Resize/Convert with Ratio)
-                // FR: Traiter le badge et la coupe pour DMD (Redimensionner/Convertir avec Ratio)
-                var dmdBadge = _imageService.ProcessDmdImage(badgePath, "achievements", "badges", isHardcore: e.IsHardcore);
-                var dmdCup = _imageService.ProcessDmdImage(cupPath, "achievements", "cup"); // Process cup to fix aspect ratio
-
-                // Execute Notifications in Parallel based on Target
+                // 2. Parallel Achievement Display
                 var mpvTask = Task.Run(async () =>
                 {
-                    if (target == "dmd" || !mpvNotifications) return; // Skip MPV if target is DMD only or notifications disabled
-
+                    if (target == "dmd" || !mpvNotifications) return;
                     try
                     {
-                        // EN: Stop MPV cycle before notification to avoid showing old overlays
-                        // FR: Arrêter cycle MPV avant notification pour éviter afficher anciens overlays
                         _mpvBadgeCycleCts?.Cancel();
-                        await _mpv.RemoveOverlay(3, false); // EN: Hide RP stats / FR: Masquer les stats RP
-                        await Task.Delay(100); // Allow cycle to stop
+                        await _mpv.RemoveOverlay(3, false);
+                        await Task.Delay(100);
                         
-                        // EN: Include count in MPV achievement notification if enabled
-                        // FR: Inclure le compteur dans la notification d'achievement MPV si activé
                         string? countOverlay = null;
-                        if (!string.IsNullOrEmpty(mpvOverlays) && mpvOverlays.Contains("count", StringComparison.OrdinalIgnoreCase))
+                        if (!string.IsNullOrEmpty(mpvOverlaysStr) && mpvOverlaysStr.Contains("count", StringComparison.OrdinalIgnoreCase))
                         {
                             var achievements = _raService?.CurrentGameAchievements;
                             if (achievements != null)
@@ -1597,205 +1583,81 @@ namespace RetroBatMarqueeManager.Application.Workflows
                             }
                         }
 
-                        // EN: Re-compose mpvOverlay to include count if available
-                        // FR: Re-composer mpvOverlay pour inclure le compteur si disponible
                         if (!string.IsNullOrEmpty(countOverlay))
                         {
-                            var mpvWithCount = _imageService.ComposeScoreAndBadges(scoreOverlay, mpvAchOverlay, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: isHc);
-                            if (!string.IsNullOrEmpty(mpvWithCount)) mpvOverlay = mpvWithCount;
+                            var mpvWithCount = _imageService.ComposeScoreAndBadges(mpvScoreOverlay, mpvAchOverlay, countOverlay, _config.MarqueeWidth, _config.MarqueeHeight, isHardcore: isHc);
+                            if (!string.IsNullOrEmpty(mpvWithCount)) mpvMainOverlay = mpvWithCount;
                         }
 
-                        // MPV Notification (cup + achievement with score/count)
-                        await _mpv.ShowAchievementNotification(cupPath, mpvOverlay, 2000, 8000);
-                        
-                        // EN: Refresh or Restart cycle even for Encore triggers / FR: Rafraîchir ou Redémarrer cycle même pour déclencheurs Encore
-                        if (!string.IsNullOrEmpty(mpvOverlays))
-                        {
-                            var activeOverlays = mpvOverlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                                                         .Select(o => o.Trim());
-                            
-                            // EN: Get updated scores / FR: Obtenir scores mis à jour
-                            int currentScore = _raService?.CurrentGameUserPoints ?? 0;
-                            int totalScore = _raService?.CurrentGameTotalPoints ?? 0;
-                            
-                            if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
-                            {
-                                var achievements = _raService?.CurrentGameAchievements;
-                                var gameId = _raService?.CurrentGameId;
-                                if (achievements != null && gameId != null && gameId > 0 && _raService != null)
-                                {
-                                    try
-                                    {
-                                        StartMpvBadgeRibbonCycle(gameId.Value, achievements, currentScore, totalScore);
-                                        _logger.LogInformation($"[RA Workflow] Restarted MPV Badge Ribbon Cycle after achievement notification");
-                                    }
-                                    catch (Exception ribbonEx)
-                                    {
-                                        _logger.LogError($"[RA Workflow] Error restarting MPV badge ribbon cycle: {ribbonEx.Message}");
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                await RefreshPersistentMpvOverlays();
-                            }
-                        }
+                        await _mpv.ShowAchievementNotification(cupPath, mpvMainOverlay, 2000, 8000);
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError($"[RA Workflow] MPV Notification Error: {ex.Message}");
-                    }
+                    catch (Exception ex) { _logger.LogError($"[RA Workflow] MPV Notification Error: {ex.Message}"); }
                 });
 
                 var dmdTask = Task.Run(async () =>
                 {
-                    if (target == "mpv" || !dmdNotifications) return; // Skip DMD if target is MPV only or notifications disabled
-
+                    if (target == "mpv" || !dmdNotifications) return;
+                    await _dmdNotificationSemaphore.WaitAsync();
                     try
                     {
-                        // EN: Stop DMD cycle and any ongoing RP narration before notification
-                        // FR: Arrêter cycle DMD et toute narration RP en cours avant notification
                         _badgeCycleCts?.Cancel();
-                        _dmdService.ClearOverlay(); // EN: Stop RP Narration immediately / FR: Stopper la narration RP immédiatement
-                        await Task.Delay(100); // Allow cycle to stop
+                        _dmdService.ClearOverlay();
+                        await Task.Delay(100);
 
-                        // DMD Overlay (ID 4 for Achievement)
-                        // EN: Use new Composite Achievement Overlay for DMD (Badge + Title + Points)
-                        // FR: Utiliser le nouvel overlay composite pour DMD (Badge + Titre + Points)
                         if (_config.DmdEnabled)
                         {
-                             // EN: Generate Composite Overlay first
-                             var dmdAchOverlay = _imageService.GenerateDmdAchievementOverlay(
-                                 badgePath, 
-                                 e.Achievement.Title, 
-                                 e.Achievement.Description, 
-                                 e.Achievement.Points, 
-                                 isHc);
-
-                             if (!string.IsNullOrEmpty(dmdAchOverlay) && File.Exists(dmdAchOverlay))
+                             var dmdAchOverlay = _imageService.GenerateDmdAchievementOverlay(badgePath, e.Achievement.Title, e.Achievement.Description, e.Achievement.Points, isHc);
+                             if (!string.IsNullOrEmpty(dmdAchOverlay))
                              {
-                                 _logger.LogInformation("[RA Workflow] Playing DMD Achievement Sequence (Cup + Composite)");
+                                 _logger.LogInformation("[RA Workflow] Playing DMD Achievement Sequence");
                                  await _dmdService.PlayAchievementSequenceAsync(cupPath, dmdAchOverlay, 10000);
                              }
-                             else
-                             {
-                                  _logger.LogWarning("[RA Workflow] Failed to generate DMD Achievement Overlay. No notification displayed.");
-                             }
-                        }
-                        
-                        // EN: Restart DMD cycle even for Encore triggers / FR: Redémarrer cycle DMD même pour déclencheurs Encore
-                        if (!string.IsNullOrEmpty(dmdOverlays))
-                        {
-                            var activeOverlays = dmdOverlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                                                         .Select(o => o.Trim());
-                            
-                            // EN: Show Count/Score before Cycle ONLY IF it's a new unlock AND we didn't just show the composite overlay (optional, but requested behavior implies replacing sequence)
-                            // FR: Afficher Compteur/Score avant Cycle SEULEMENT SI c'est un nouveau déblocage
-                            if (e.IsNewUnlock)
-                            {
-                                // Logic for Count/Score display remains here if needed or skipped if consumed by specific overlay
-                                // For now, we keep Count/Score standard display as 'secondary' notification if enabled
-                                if (activeOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
-                                {
-                                    var currentAchievements = _raService?.CurrentGameAchievements;
-                                    if (currentAchievements != null)
-                                    {
-                                        int unlockedCount = currentAchievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
-                                        var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, currentAchievements.Count, isDmd: true, isHardcore: isHc);
-                                        if (File.Exists(dmdCount))
-                                        {
-                                            await _dmdService.SetOverlayAsync(dmdCount, 5000); 
-                                            _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay (Post-Achievement): {dmdCount}");
-                                            await Task.Delay(5000);
-                                        }
-                                    }
-                                }
-                                
-                                if (activeOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
-                                {
-                                    int currentVal = _raService?.CurrentGameUserPoints ?? 0;
-                                    int totalVal = _raService?.CurrentGameTotalPoints ?? 0;
-                                    var dmdScore = _imageService.GenerateScoreOverlay(currentVal, totalVal, isDmd: true, isHardcore: _raService?.IsHardcoreMode ?? false);
-                                    if (File.Exists(dmdScore))
-                                    {
-                                        await _dmdService.SetOverlayAsync(dmdScore, 5000);
-                                        _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay (Post-Achievement): {dmdScore}");
-                                        await Task.Delay(5000);
-                                    }
-                                }
-                            }
-
-                            // EN: Always Restart DMD cycle
-                            // FR: Toujours redémarrer cycle DMD
-                            var achievements = _raService?.CurrentGameAchievements;
-                            var gameId = _raService?.CurrentGameId;
-                            if (achievements != null && gameId != null && gameId > 0 && _raService != null)
-                            {
-                                try
-                                {
-                                    if (activeOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
-                                    {
-                                        StartBadgeRibbonCycle(gameId.Value, achievements);
-                                        _logger.LogInformation($"[RA Workflow] Restarted DMD Badge Ribbon Cycle after achievement notification");
-                                    }
-                                }
-                                catch (Exception ribbonEx)
-                                {
-                                    _logger.LogError($"[RA Workflow] Error restarting DMD badge ribbon cycle: {ribbonEx.Message}");
-                                }
-                            }
                         }
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) { _logger.LogError($"[RA Workflow] DMD Notification Error: {ex.Message}"); }
+                    finally
                     {
-                        _logger.LogError($"[RA Workflow] DMD Notification Error: {ex.Message}");
+                        _dmdNotificationSemaphore.Release();
                     }
                 });
 
                 await Task.WhenAll(mpvTask, dmdTask);
 
-                // EN: Ensure cycles are restarted if notifications were skipped
-                // FR: S'assurer que les cycles redémarrent si les notifications ont été sautées
-                if (_gameRunning && _raService != null && _raService.CurrentGameId.HasValue)
+                // 3. Post-Notification Overlays & Cycle Restart
+                // EN: Only restart cycles if NO more achievements are pending in the burst
+                // FR: Ne redémarrer les cycles que si PLUS AUCUN succès n'est en attente dans la rafale
+                if (_gameRunning && _activeAchievementCount == 0 && _raService != null && _raService.CurrentGameId.HasValue)
                 {
                     var achievements = _raService.CurrentGameAchievements;
                     if (achievements != null && achievements.Count > 0)
                     {
-                        // MPV Refresh/Restart if notification was off
-                        if (!mpvNotifications && !string.IsNullOrEmpty(mpvOverlays))
+                        // MPV Restart
+                        if (!string.IsNullOrEmpty(mpvOverlaysStr))
                         {
-                             if (mpvOverlays.Contains("badges", StringComparison.OrdinalIgnoreCase))
+                             if (mpvOverlaysStr.Contains("badges", StringComparison.OrdinalIgnoreCase))
                                  StartMpvBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements, _raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints);
                              else
                                  await RefreshPersistentMpvOverlays();
                         }
 
-                        // DMD Restart/Refresh if notification was off
-                        if (!dmdNotifications && !string.IsNullOrEmpty(dmdOverlays))
+                        // DMD Restart
+                        if (!string.IsNullOrEmpty(dmdOverlaysStr))
                         {
-                            var activeDmdOverlays = dmdOverlays.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(o => o.Trim());
-                            if (activeDmdOverlays.Contains("badges", StringComparer.OrdinalIgnoreCase))
-                            {
+                            var dmdActive = dmdOverlaysStr.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(o => o.Trim());
+                            if (dmdActive.Contains("badges", StringComparer.OrdinalIgnoreCase))
                                 StartBadgeRibbonCycle(_raService.CurrentGameId.Value, achievements);
-                            }
                             else
                             {
-                                // EN: Manual one-shot refresh for DMD (Count/Score)
-                                // FR: Rafraîchissement manuel unique pour DMD (Compteur/Score)
-                                if (activeDmdOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
+                                if (dmdActive.Contains("count", StringComparer.OrdinalIgnoreCase))
                                 {
                                     int unlocked = achievements.Values.Count(a => isHc ? a.DateEarnedHardcore.HasValue : a.Unlocked);
-                                    var dmdCount = _imageService.GenerateAchievementCountOverlay(unlocked, achievements.Count, isDmd: true, isHardcore: isHc);
-                                    if (File.Exists(dmdCount))
-                                    {
-                                        await _dmdService.SetOverlayAsync(dmdCount, 5000);
-                                        await Task.Delay(5000); // Wait before potential score
-                                    }
+                                    var countFile = _imageService.GenerateAchievementCountOverlay(unlocked, achievements.Count, isDmd: true, isHardcore: isHc);
+                                    if (File.Exists(countFile)) { await _dmdService.SetOverlayAsync(countFile, 5000); await Task.Delay(5000); }
                                 }
-                                if (activeDmdOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
+                                if (dmdActive.Contains("score", StringComparer.OrdinalIgnoreCase))
                                 {
-                                    var dmdScore = _imageService.GenerateScoreOverlay(_raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints, isDmd: true, isHardcore: isHc);
-                                    if (File.Exists(dmdScore)) await _dmdService.SetOverlayAsync(dmdScore, 5000);
+                                    var scoreFile = _imageService.GenerateScoreOverlay(_raService.CurrentGameUserPoints, _raService.CurrentGameTotalPoints, isDmd: true, isHardcore: isHc);
+                                    if (File.Exists(scoreFile)) await _dmdService.SetOverlayAsync(scoreFile, 5000);
                                 }
                             }
                         }
@@ -1808,9 +1670,12 @@ namespace RetroBatMarqueeManager.Application.Workflows
             }
             finally
             {
-                 // EN: Restore RP updates
-                 // FR: Restaurer les mises à jour RP
-                 _isProcessingAchievement = false;
+                int remaining = Interlocked.Decrement(ref _activeAchievementCount);
+                if (remaining <= 0)
+                {
+                    _isProcessingAchievement = false;
+                    _logger.LogInformation("[RA Workflow] All achievements processed. RP and Cycles restored.");
+                }
             }
         }
         
@@ -1947,27 +1812,30 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 {
                     if (dmdOverlays.Contains("count", StringComparer.OrdinalIgnoreCase) || dmdOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
                     {
-                        if (_raService == null) return;
+                        if (_raService == null || e.UserProgress?.Achievements == null) return;
             
-                        int current = _raService.CurrentGameUserPoints;
-                        int total = _raService.CurrentGameTotalPoints;
+                        bool isHcEvent = e.IsHardcore; // Use event's HC status
+                        int current = e.UserProgress.Achievements.Values
+                            .Where(a => isHcEvent ? a.DateEarnedHardcore.HasValue : a.Unlocked)
+                            .Sum(a => a.Points);
+                        int total = e.UserProgress.Achievements.Values.Sum(a => a.Points);
+                        
+                        _logger.LogInformation($"[RA Workflow] In-game points at start: {current}/{total} (HC: {isHcEvent})");
             
-            // Note: dmdScore generation moved inside specific block to ensure latest state
+                        // Note: dmdScore generation moved inside specific block to ensure latest state
     
                             if (dmdOverlays.Contains("count", StringComparer.OrdinalIgnoreCase))
                             {
                                 var isHardcore = _raService?.IsHardcoreMode ?? false;
                                 int unlockedCount = e.UserProgress.Achievements.Values.Count(a => isHardcore ? a.DateEarnedHardcore.HasValue : a.Unlocked);
                                 var dmdCount = _imageService.GenerateAchievementCountOverlay(unlockedCount, e.UserProgress.Achievements.Count, isDmd: true, isHardcore: isHardcore);
-                                if (File.Exists(dmdCount))
-                                {
-                                    if (!_gameRunning) return; // Prevent if game stopped
-                                    await _dmdService.SetOverlayAsync(dmdCount, 5000); // Show for 5s
+                                    // EN: Check if an achievement notification started during delay
+                                    if (_dmdService.IsSequencePlaying) return;
+
+                                    await _dmdService.SetPriorityOverlayAsync(dmdCount, 5000); // Show for 5s (Protected)
                                     _logger.LogInformation($"[RA Workflow] Displayed DMD Count Overlay: {dmdCount}");
                                     
-                                    await Task.Delay(5000); // Wait before showing score
                                     if (!_gameRunning) return; // Prevent if game stopped during delay
-                                }
                             }
                             
                             if (dmdOverlays.Contains("score", StringComparer.OrdinalIgnoreCase))
@@ -1979,9 +1847,12 @@ namespace RetroBatMarqueeManager.Application.Workflows
                                 var isHardcore = _raService?.IsHardcoreMode ?? false;
                                 var dmdScore = _imageService.GenerateScoreOverlay(current, total, isDmd: true, isHardcore: isHardcore);
                                 
-                                await _dmdService.SetOverlayAsync(dmdScore, 5000);
-                                _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay: {dmdScore}");
-                                await Task.Delay(5000); // EN: Wait before potential badge ribbon / FR: Attendre avant éventuel cycle de badges
+                                // EN: Check sequence playing before score
+                                if (!_dmdService.IsSequencePlaying)
+                                {
+                                    await _dmdService.SetPriorityOverlayAsync(dmdScore, 5000); // Show for 5s (Protected)
+                                    _logger.LogInformation($"[RA Workflow] Displayed DMD Score Overlay: {dmdScore}");
+                                }
                             }
                         }
                     }
@@ -2282,6 +2153,12 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
                     while (!token.IsCancellationRequested)
                     {
+                        // EN: Wait if an achievement sequence is playing
+                        while ((_dmdService.IsSequencePlaying || _isProcessingAchievement) && !token.IsCancellationRequested)
+                        {
+                            await Task.Delay(1000, token);
+                        }
+
                         // 1. Show Badges (if any)
                         if (groups.Count > 0)
                         {

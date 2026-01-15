@@ -2308,6 +2308,8 @@ namespace RetroBatMarqueeManager.Application.Services
             {
                 try
                 {
+                    if (!WaitForFile(imagePath)) return Array.Empty<byte>();
+
                     using var fs = new FileStream(imagePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                     using var originalBitmap = new Bitmap(fs); 
                     return GetRawDmdBytes(originalBitmap, width, height, grayscale);

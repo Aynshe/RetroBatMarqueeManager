@@ -164,6 +164,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
 
     public interface IDmdService
     {
+        bool IsSequencePlaying { get; }
         Task InitializeAsync();
         Task PlayAsync(string mediaPath, string? system = null, string? gameName = null);
         Task SetOverlayAsync(string imagePath, int durationMs = 5000);
@@ -175,6 +176,7 @@ namespace RetroBatMarqueeManager.Core.Interfaces
         Task PlayChallengeNotificationAsync(ChallengeState state, bool isHardcore = false, string? ribbonPath = null); // EN: Play Challenge Overlay / FR: Jouer Overlay Défi
         Task PlayFullPreviewAsync(); // EN: Play a full preview of all templates / FR: Jouer une prévisualisation complète de tous les templates
         Task<(bool handled, bool suspendMPV)> CheckAndRunPinballAsync(string system, string gameName);
+        Task SetPriorityOverlayAsync(string imagePath, int durationMs);
         void ClearOverlay(); // EN: Clear active overlay / FR: Effacer overlay actif
         void Stop();
         string PrepareConfig(); // Generates DmdDevice.ini if needed

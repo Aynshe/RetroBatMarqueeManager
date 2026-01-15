@@ -859,18 +859,15 @@ namespace RetroBatMarqueeManager.Application.Services
                  // 2. Show Composite Overlay (Remainder)
                  if (!string.IsNullOrEmpty(achOverlayPath))
                  {
-                     if (File.Exists(achOverlayPath))
-                     {
-                         var info = new FileInfo(achOverlayPath);
-                         _logger.LogInformation($"[DMD Sequence] Playing Achievement Overlay: {achOverlayPath} (Size: {info.Length} bytes)");
-                         
-                         await SetOverlayAsync(achOverlayPath, 8000); // 8s final static (Total ~10s)
-                         await Task.Delay(8000);
-                     }
-                     else
-                     {
-                          _logger.LogWarning($"[DMD Sequence] Achievement Overlay file not found: {achOverlayPath}");
-                     }
+                      _logger.LogInformation($"[DMD Sequence] Playing Achievement Overlay: {achOverlayPath}");
+                      
+                      // EN: Clear cup animation before showing static overlay to avoid flicker or stale frames
+                      // FR: Effacer l'animation de la coupe avant d'afficher l'overlay statique pour éviter scintillement ou frames obsolètes
+                      ClearOverlay(); 
+                      await Task.Delay(200); // EN: Wait a bit for the device to clear / FR: Attendre un peu que le périphérique s'efface
+                      
+                      await SetOverlayAsync(achOverlayPath, 8000); 
+                      await Task.Delay(8000);
                  }
                  else
                  {
@@ -886,6 +883,11 @@ namespace RetroBatMarqueeManager.Application.Services
                  lock(_overlayLock) { _isSequencePlaying = false; }
                  _logger.LogInformation("[DMD Sequence] Finished.");
              }
+        }
+
+        public bool IsSequencePlaying
+        {
+            get { lock (_overlayLock) { return _isSequencePlaying; } }
         }
 
         private bool _isSequencePlaying = false;
@@ -1186,6 +1188,10 @@ namespace RetroBatMarqueeManager.Application.Services
                  }
                 if (_config.GetSetting("DmdForceMono", "false") == "true") useGrayscale = true;
 
+                 // EN: Ensure driver is open for physical DMD display
+                 // FR: S'assurer que le driver est ouvert pour l'affichage DMD physique
+                 await EnsureNativeOpenAsync();
+
                  // EN: Check for GIF (Animated Overlay)
                  if (imagePath.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) && File.Exists(imagePath))
                  {
@@ -1208,7 +1214,7 @@ namespace RetroBatMarqueeManager.Application.Services
                          _activeOverlayBytes = bytes;
                          _overlayExpiry = DateTime.Now.AddMilliseconds(durationMs);
                      }
-                     _logger.LogInformation($"[DMD] Overlay set for {durationMs}ms");
+                     // _logger.LogInformation($"[DMD] Overlay set for {durationMs}ms");
 
                      // EN: If no animation loop is running (Static Image), manually update display
                      // FR: Si aucune boucle d'animation (Image Statique), mettre à jour l'affichage manuellement
@@ -1379,6 +1385,22 @@ namespace RetroBatMarqueeManager.Application.Services
             _logger.LogInformation("[DMD] Overlay cleared and Render triggered");
         }
         
+        public async Task SetPriorityOverlayAsync(string imagePath, int durationMs)
+        {
+            lock(_overlayLock) { _isSequencePlaying = true; }
+            try
+            {
+                _logger.LogInformation($"[DMD Priority] Setting priority overlay: {Path.GetFileName(imagePath)} ({durationMs}ms)");
+                await SetOverlayAsync(imagePath, durationMs);
+                await Task.Delay(durationMs);
+            }
+            finally
+            {
+                lock(_overlayLock) { _isSequencePlaying = false; }
+                _logger.LogInformation("[DMD Priority] Finished.");
+            }
+        }
+
         private void RenderStaticWithOverlay(bool useGrayscale)
         {
              try
@@ -1396,7 +1418,12 @@ namespace RetroBatMarqueeManager.Application.Services
                      score = _persistentScoreBytes;
                  }
                  
-                 if (baseBytes == null) return; // Nothing to show?
+                 if (baseBytes == null)
+                 {
+                     // EN: If no base image, create a black background
+                     // FR: Si aucune image de base, créer un fond noir
+                     baseBytes = new byte[_config.DmdWidth * _config.DmdHeight * (useGrayscale ? 1 : 3)];
+                 }
                  
                  var bytesToSend = new byte[baseBytes.Length];
                  Array.Copy(baseBytes, bytesToSend, baseBytes.Length);
