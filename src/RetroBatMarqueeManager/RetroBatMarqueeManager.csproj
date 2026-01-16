@@ -7,9 +7,9 @@
     <UserSecretsId>dotnet-RetroBatMarqueeManager-d8a9514f-a3df-46f6-a788-ad0aa80d5d76</UserSecretsId>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>RetroBatMarqueeManager.App</AssemblyName>
-    <Version>1.1.0-beta</Version>
-    <FileVersion>1.1.0.0</FileVersion>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <Version>1.1.3-beta</Version>
+    <FileVersion>1.1.3.0</FileVersion>
+    <AssemblyVersion>1.1.3.0</AssemblyVersion>
     <OutputPath>..\..\RetroBatMarqueeManager\bin\$(Configuration)\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>

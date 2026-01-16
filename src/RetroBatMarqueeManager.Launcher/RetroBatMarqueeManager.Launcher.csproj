@@ -6,9 +6,9 @@
     <AssemblyName>RetroBatMarqueeManager</AssemblyName>
     <ApplicationIcon>..\RetroBatMarqueeManager\Resources\icon.ico</ApplicationIcon>
     <LangVersion>7.3</LangVersion>
-    <Version>1.1.0-beta</Version>
-    <FileVersion>1.1.0.0</FileVersion>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <Version>1.1.3-beta</Version>
+    <FileVersion>1.1.3.0</FileVersion>
+    <AssemblyVersion>1.1.3.0</AssemblyVersion>
     <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
     <OutputPath>..\..\RetroBatMarqueeManager\bin\$(Configuration)\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
