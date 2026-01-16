@@ -3,6 +3,7 @@ namespace RetroBatMarqueeManager.Core.Models.RetroAchievements
     public class OverlayResult
     {
         public string Path { get; set; } = string.Empty;
+        
         public int X { get; set; }
         public int Y { get; set; }
         public int Width { get; set; }

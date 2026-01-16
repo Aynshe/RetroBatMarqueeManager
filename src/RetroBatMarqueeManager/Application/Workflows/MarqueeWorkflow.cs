@@ -59,6 +59,11 @@ namespace RetroBatMarqueeManager.Application.Workflows
         private readonly ConcurrentDictionary<int, CancellationTokenSource> _challengeRefreshCts = new(); // EN: For real-time timer refresh / FR: Pour rafraîchissement temps réel timer
         private ConcurrentDictionary<int, ChallengeState> _activeChallenges = new(); // EN: Storage for all active challenges / FR: Stockage pour tous les défis actifs (Now ConcurrentDictionary)
         private CancellationTokenSource? _mpvChallengeCycleCts; // EN: For MPV challenge cycling / FR: Pour cycle challenges MPV        
+        private CancellationTokenSource? _narrationCts;
+        private Guid _currentNarrationId = Guid.Empty;
+        private string? _activeNarrationPath;
+        private string? _activeNarrationPosition;
+        // EN: For MPV narration timeout / FR: Pour timeout narration MPV
         // Active Media Paths
         private string? _currentMarqueePath; 
         private string? _currentDmdPath;
@@ -279,6 +284,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
                     if (!string.IsNullOrEmpty(newPath))
                     {
+                        _currentMarqueePath = newPath; // EN: Update stored path for refresh / FR: Mettre à jour le chemin stocké pour le rafraîchissement
                         await _mpv.DisplayImage(newPath);
 
                         // EN: Also refresh DMD if Composition is enabled
@@ -505,6 +511,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                      }
 
                      // Play source video looping
+                     _currentMarqueePath = videoSourcePath; // EN: Update stored path / FR: Mettre à jour le chemin stocké
                      await _mpv.DisplayImage(videoSourcePath, loop: true);
                      _lastPlayedVideoPath = videoSourcePath; // Update state
 
@@ -533,6 +540,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 if (string.IsNullOrEmpty(logoPath))
                 {
                     _logger.LogWarning($"[VideoAdjustment] Logo not found for {romFileName}, displaying frame only");
+                    _currentMarqueePath = _currentVideoPreviewFrame; // EN: Update stored path / FR: Mettre à jour le chemin stocké
                     await _mpv.DisplayImage(_currentVideoPreviewFrame);
                     return;
                 }
@@ -556,6 +564,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
                 if (!string.IsNullOrEmpty(composedPath) && File.Exists(composedPath))
                 {
+                    _currentMarqueePath = composedPath; // EN: Update stored path / FR: Mettre à jour le chemin stocké
                     await _mpv.DisplayImage(composedPath);
                     _logger.LogInformation($"[VideoAdjustment] ✓ Preview refreshed successfully");
                 }
@@ -1072,6 +1081,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                         var composedPath = _marqueeFinder.FindGameOverMarquee();
                         if (!string.IsNullOrEmpty(composedPath) && File.Exists(composedPath))
                         {
+                            _currentMarqueePath = composedPath; // EN: Update stored path / FR: Mettre à jour le chemin stocké
                             await _mpv.DisplayImage(composedPath);
                             _logger.LogInformation($"Displayed GAME OVER composition: {composedPath}");
                             gameOverDisplayed = true;
@@ -1091,6 +1101,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                             
                             if (gameMarquee != null)
                             {
+                                _currentMarqueePath = gameMarquee; // EN: Update stored path / FR: Mettre à jour le chemin stocké
                                 await _mpv.DisplayImage(gameMarquee);
                                 _logger.LogInformation($"Restored game marquee (Fallback): {gameMarquee}");
                             }
@@ -1278,7 +1289,7 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 _logger.LogInformation($"[Pinball] Suspending MPV for '{system}'.");
                 // EN: Stop internal MPV player and hide window
                 // FR: Arrêter le lecteur MPV interne et cacher la fenêtre
-                _mpv.Stop();
+                await _mpv.Stop();
                 _mpvSuspendedForPinball = true;
             }
 
@@ -1349,16 +1360,19 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 var ext = Path.GetExtension(topperMedia).ToLowerInvariant();
                 bool shouldLoop = new[] { ".gif", ".mp4", ".avi", ".mkv", ".webm", ".mov" }.Contains(ext);
                 
+                _currentMarqueePath = topperMedia; // EN: Update stored path for refresh / FR: Mettre à jour le chemin stocké pour le rafraîchissement
                 tasks.Add(_mpv.DisplayImage(topperMedia, shouldLoop).ContinueWith(t => 
                     _logger.LogInformation($"Displayed game-start topper: {topperMedia} (loop={shouldLoop})")));
             }
             else if (marqueeFile != null && !suspendMPV)
             {
+                _currentMarqueePath = marqueeFile; // EN: Update stored path for refresh / FR: Mettre à jour le chemin stocké pour le rafraîchissement
                 tasks.Add(_mpv.DisplayImage(marqueeFile).ContinueWith(t => 
                     _logger.LogInformation($"Displayed game marquee: {marqueeFile}")));
             }
             else if (systemMarquee != null && !suspendMPV)
             {
+                 _currentMarqueePath = systemMarquee; // EN: Update stored path for refresh / FR: Mettre à jour le chemin stocké pour le rafraîchissement
                  tasks.Add(_mpv.DisplayImage(systemMarquee).ContinueWith(t => 
                     _logger.LogInformation($"Displayed system marquee: {systemMarquee}")));
             }
@@ -1749,6 +1763,9 @@ namespace RetroBatMarqueeManager.Application.Workflows
 
                 // EN: Purge old Hardcore overlays to prevent accumulation
                 // FR: Purger les anciens overlays Hardcore pour éviter l'accumulation
+
+                // EN: Purge old Hardcore overlays to prevent accumulation
+                // FR: Purger les anciens overlays Hardcore pour éviter l'accumulation
                 _imageService.PurgeHardcoreOverlays();
                 _imageService.PurgeSoftcoreOverlays(); // Added softcore purge as requested
 
@@ -1891,6 +1908,41 @@ namespace RetroBatMarqueeManager.Application.Workflows
             {
                 _logger.LogError($"[RA Workflow] Error handling game start: {ex.Message}");
             }
+        }
+
+        private async Task RefreshMpvOverlays()
+        {
+             // EN: Reload the main background ONLY for static images to ensure MPV doesn't freeze.
+             // FR: Recharger le fond principal UNIQUEMENT pour les images statiques pour s'assurer que MPV ne se fige pas.
+             if (!string.IsNullOrEmpty(_currentMarqueePath) && File.Exists(_currentMarqueePath))
+             {
+                 string ext = Path.GetExtension(_currentMarqueePath).ToLowerInvariant();
+                 bool isVideo = ext == ".mp4" || ext == ".mkv" || ext == ".avi" || ext == ".mov" || ext == ".wmv" || ext == ".webm";
+                 
+                 if (!isVideo)
+                 {
+                     await _mpv.DisplayImage(_currentMarqueePath);
+                 }
+             }
+
+             // EN: Wait a bit for the background to load before overlays
+             // FR: Attendre un peu que le fond charge
+             await Task.Delay(200);
+
+             // EN: Restore active narration if any (background reload might have cleared it)
+             // FR: Restaurer la narration active si nécessaire
+             if (_currentNarrationId != Guid.Empty && !string.IsNullOrEmpty(_activeNarrationPath))
+             {
+                 await _mpv.OverlayImage(_activeNarrationPath, 4, _activeNarrationPosition ?? "center", loopCount: 0);
+             }
+
+             await RefreshPersistentMpvOverlays();
+             if (_currentMpvRpGenericStats.Count > 0)
+             {
+                 // EN: Use a standard offset height if not easily retrievable
+                 // FR: Utiliser une hauteur d'offset standard pour la rotation
+                 StartMpvRpStatRotation(60); 
+             }
         }
 
         /// <summary>
@@ -2505,6 +2557,13 @@ namespace RetroBatMarqueeManager.Application.Workflows
                     _mpvChallengeCycleCts = null;
                 }
 
+                if (_narrationCts != null)
+                {
+                    _narrationCts.Cancel();
+                    _narrationCts.Dispose();
+                    _narrationCts = null;
+                }
+
                 _activeChallenges.Clear();
 
                 // 2. Stop all Challenge refresh tasks (Deprecated but safe cleanup)
@@ -2522,6 +2581,10 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 {
                     StopMpvRpStatRotation(); // Stop MPV RP Rotation Loop
                     
+                    // EN: Clear persistent generic stats
+                    // FR: Effacer les stats génériques persistantes
+                    lock(_currentMpvRpGenericStats) { _currentMpvRpGenericStats.Clear(); }
+                    
                     // EN: Clear slots 1-12 to be exhaustive (includes RA notifications, scores, and preview slots)
                     // FR: Nettoyer les slots 1-12 pour être exhaustif (inclus notifications RA, scores et slots preview)
                     for (int i = 1; i <= 12; i++)
@@ -2535,6 +2598,11 @@ namespace RetroBatMarqueeManager.Application.Workflows
                 if (_config.DmdEnabled)
                 {
                     StopDmdRpStatRotation(); // EN: Stop RP rotation first / FR: Arrêter la rotation RP d'abord
+                    
+                    // EN: Explicitly clear persistent RP stats to prevent stale data on next game
+                    // FR: Effacer explicitement les stats RP persistantes pour éviter les données obsolètes au prochain jeu
+                    lock(_currentDmdRpStats) { _currentDmdRpStats.Clear(); }
+                    
                     _dmdService.ClearOverlay();
                     await _dmdService.SetDmdPersistentScoreAsync(""); // EN: Clear persistent score / FR: Effacer le score permanent
                     await _dmdService.SetDmdPersistentLayoutAsync(Array.Empty<byte>()); // EN: Explicitly clear persistent RP layout / FR: Effacer explicitement le layout RP persistant
@@ -2654,11 +2722,50 @@ namespace RetroBatMarqueeManager.Application.Workflows
                         var narrationResult = await _imageService.GenerateRichPresenceOverlay(currentState.Narrative, isHc, _config.MarqueeWidth, _config.MarqueeHeight, position: "center");
                         if (narrationResult.IsValid && File.Exists(narrationResult.Path))
                         {
-                            await _mpv.OverlayImage(narrationResult.Path, 4, $"{narrationResult.X}:{narrationResult.Y}");
-                            // EN: Use calculated GIF duration + buffer if available, or default to 15s
-                            // FR: Utiliser la durée calculée du GIF + buffer si disponible, ou défaut à 15s
-                            int delay = (narrationResult.DurationMs > 0) ? narrationResult.DurationMs : 15000;
-                            _ = Task.Delay(delay).ContinueWith(_ => _mpv.RemoveOverlay(4, false));
+                            // EN: Cancel previous narration timeout
+                            // FR: Annuler le timeout de la narration précédente
+                            _narrationCts?.Cancel();
+                            _narrationCts?.Dispose();
+                            _narrationCts = new CancellationTokenSource();
+                            var token = _narrationCts.Token;
+                            var narrationId = Guid.NewGuid();
+                            _currentNarrationId = narrationId;
+
+                            // EN: Use GIF path (transparency works correctly with GIF)
+                            // FR: Utiliser le chemin GIF (la transparence fonctionne correctement avec GIF)
+                            string mpvPath = narrationResult.Path; 
+                            _activeNarrationPath = mpvPath;
+                            _activeNarrationPosition = $"{narrationResult.X}:{narrationResult.Y}";
+                            
+                            await _mpv.OverlayImage(mpvPath, 4, _activeNarrationPosition, loopCount: 0);
+                            
+                            // EN: Return to transparent placeholder after duration to maintain MPV continuity
+                            // FR: Revenir au placeholder transparent après la durée
+                            int durationMs = narrationResult.DurationMs > 0 ? narrationResult.DurationMs : 10000; // Default 10s if not set
+                            
+                            // EN: Cleanup narration after duration
+                            // FR: Nettoyer la narration après la durée
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await Task.Delay(durationMs, token);
+                                    if (!token.IsCancellationRequested && _currentNarrationId == narrationId)
+                                    {
+                                        await _mpv.RemoveOverlay(4, false);
+                                        _activeNarrationPath = null;
+                                        _activeNarrationPosition = null;
+                                        _currentNarrationId = Guid.Empty;
+                                        _logger.LogInformation($"[RA Workflow] Narration expired ({durationMs}ms). Slot 4 removed.");
+                                        
+                                        // EN: Trigger a refresh of RA overlays to ensure visibility
+                                        // FR: Déclencher un rafraîchissement des overlays RA pour assurer la visibilité
+                                        await RefreshMpvOverlays();
+                                    }
+                                }
+                                catch (OperationCanceledException) { }
+                                catch (Exception ex) { _logger.LogError($"[RA Workflow] Error on narration cleanup: {ex.Message}"); }
+                            }, token);
                         }
                     }
                 }

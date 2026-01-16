@@ -229,6 +229,10 @@ namespace RetroBatMarqueeManager.Application.Services
                 // New Racing Defaults (Share slots with Score/Lives)
                 dict["rp_lap"] = new OverlayItem { X = (int)(w * 0.015), Y = (int)(h * 0.03), Width = (int)(w * 0.31), Height = (int)(h * 0.31), ZOrder = 5 }; // Top Left (Same as Lives)
                 dict["rp_rank"] = new OverlayItem { X = (int)(w * 0.62), Y = (int)(h * 0.03), Width = (int)(w * 0.36), Height = (int)(h * 0.31), ZOrder = 5 }; // Top Right (Same as Score)
+
+                // New Crystal/Gem Defaults
+                dict["rp_crystal"] = new OverlayItem { X = 0, Y = (int)(h * 0.34), Width = (int)(w * 0.5), Height = (int)(h * 0.31), ZOrder = 5 }; // Middle Left (Same as Stat)
+                dict["rp_gem"] = new OverlayItem { X = (int)(w * 0.5), Y = (int)(h * 0.34), Width = (int)(w * 0.5), Height = (int)(h * 0.31), ZOrder = 5 }; // Middle Right (Same as Weapon)
             }
             else
             {
@@ -274,6 +278,10 @@ namespace RetroBatMarqueeManager.Application.Services
                 // New Racing Defaults
                 dict["rp_lap"] = new OverlayItem { X = 20, Y = 100, Width = 400, Height = 80, ZOrder = 5 }; // Top-Left (Same as Stat)
                 dict["rp_rank"] = new OverlayItem { X = w - 420, Y = 100, Width = 400, Height = 80, ZOrder = 5 }; // Top-Right (Same as Score)
+                
+                // New Crystal/Gem Defaults
+                dict["rp_crystal"] = new OverlayItem { X = 20, Y = 100, Width = 400, Height = 80, ZOrder = 5 }; // Top-Left (Same as Stat)
+                dict["rp_gem"] = new OverlayItem { X = 20, Y = 100, Width = 400, Height = 80, ZOrder = 5 }; // Top-Left (Same as Stat)
             }
             return dict;
         }

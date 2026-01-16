@@ -31,6 +31,17 @@ namespace RetroBatMarqueeManager.Infrastructure.Processes
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void mpv_free(IntPtr data);
 
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr mpv_wait_event(IntPtr ctx, double timeout);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct mpv_event
+        {
+            public int event_id;
+            public int error;
+            public ulong reply_userdata;
+        }
+
         /// <summary>
         /// Helper to execute mpv_command with string array. Handles UTF-8 marshalling and NULL termination.
         /// </summary>

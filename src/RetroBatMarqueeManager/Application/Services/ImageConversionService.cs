@@ -4524,6 +4524,35 @@ namespace RetroBatMarqueeManager.Application.Services
                 narrativeDraft = narrativeDraft.Replace(match.Value, ""); // Remove from narrative
             }
 
+            // EN: Step 4 - Special Pass for Crystals and Gems (Natural Language: "with X crystals and Y gems")
+            // FR: Étape 4 - Passe spéciale pour Cristaux et Gemmes (Langage naturel : "with X crystals and Y gems")
+            var crystalGemMatches = System.Text.RegularExpressions.Regex.Matches(narrativeDraft,
+                @"\b(?<value>\d+)\s+(?<type>crystals?|gems?)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            foreach (System.Text.RegularExpressions.Match match in crystalGemMatches)
+            {
+                var val = match.Groups["value"].Value;
+                var type = match.Groups["type"].Value.ToLowerInvariant();
+                
+                // EN: Use Emojis for keys (Crystals=🔮, Gems=💎) so they fall into rp_stat logic (Key + Value)
+                // FR: Utiliser des Emojis pour les clés (Crystals=🔮, Gems=💎) pour qu'ils tombent dans la logique rp_stat (Clé + Valeur)
+                var key = type.StartsWith("crystal") ? "🔮" : "💎";
+
+                state.Stats[key] = val;
+                
+                // EN: Remove the match from narrative (e.g. "0 gems")
+                // FR: Supprimer la correspondance de la narration
+                narrativeDraft = narrativeDraft.Replace(match.Value, "");
+            }
+            
+            // EN: Cleanup "with" and "and" leftovers from narrative if they become isolated
+            // FR: Nettoyer les "with" et "and" restants dans la narration s'ils deviennent isolés
+            narrativeDraft = System.Text.RegularExpressions.Regex.Replace(narrativeDraft, @"\bwith\s*(?=\s|$)", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            narrativeDraft = System.Text.RegularExpressions.Regex.Replace(narrativeDraft, @"\band\s*(?=\s|$)", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            narrativeDraft = System.Text.RegularExpressions.Regex.Replace(narrativeDraft, @"\bwith\s+and\b", "with", System.Text.RegularExpressions.RegexOptions.IgnoreCase); // Fix "with and"
+
+
             // EN: Clean up separators left behind (include '·' \u00B7)
             // FR: Nettoyer les séparateurs restants (incluant '·')
             // EN: Use Regex split to handle separators more intelligently
@@ -4981,7 +5010,9 @@ namespace RetroBatMarqueeManager.Application.Services
                 if (!Directory.Exists(Path.GetDirectoryName(gifPath)!)) Directory.CreateDirectory(Path.GetDirectoryName(gifPath)!);
                 
                 // ffmpeg -framerate 30 -i frame_%03d.png -vf "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" output.gif
-                string args = $"-y -framerate 30 -i \"{Path.Combine(tempDir, "frame_%03d.png")}\" -vf \"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{gifPath}\"";
+                // EN: Use -loop 1 to play only once (narration)
+                // FR: Utiliser -loop 1 pour ne jouer qu'une fois (narration)
+                string args = $"-y -framerate 30 -i \"{Path.Combine(tempDir, "frame_%03d.png")}\" -vf \"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" -loop 1 \"{gifPath}\"";
                 
                 var startInfo = new ProcessStartInfo
                 {
@@ -5095,7 +5126,7 @@ namespace RetroBatMarqueeManager.Application.Services
                          int speed = 18;
                          int frames = (int)((boxRect.Width + textSize.Width) / speed) + 30;
                          if (frames > 300) { speed = 25; frames = (int)((boxRect.Width + textSize.Width) / speed) + 30; }
-                         result.DurationMs = (frames * 50) + 1000;
+                         result.DurationMs = (frames * 50) + 3000; // EN: Increase buffer to 3s / FR: Augmenter le buffer à 3s
                      }
                     
                     bgImage?.Dispose();
@@ -5125,11 +5156,11 @@ namespace RetroBatMarqueeManager.Application.Services
 
                 // Initial calculation of frames (at 20fps)
                 // Logic: Scroll from Right edge of BOX to Left edge of BOX
-                int totalFrames = (int)((boxRect.Width + textWidth) / speed) + 30; 
+                int totalFrames = (int)((boxRect.Width + textWidth) / speed) + 60; 
                 
-                // EN: Set approximate duration (50ms per frame at 20fps + 1s buffer)
-                // FR: Définir durée approximative (50ms par frame à 20fps + 1s buffer)
-                result.DurationMs = (totalFrames * 50) + 1000; 
+                // EN: Set approximate duration (50ms per frame at 20fps + 3s buffer)
+                // FR: Définir durée approximative (50ms par frame à 20fps + 3s buffer)
+                result.DurationMs = (totalFrames * 50) + 3000; 
                     
                 // Cap frames to avoid huge files if text is extremely long, but allow enough for scrolling
                 // FR: Limiter les frames
@@ -5137,8 +5168,8 @@ namespace RetroBatMarqueeManager.Application.Services
                 // FR: Limiter les frames
                 if (totalFrames > 300) { 
                     speed = 25; 
-                    totalFrames = (int)((boxRect.Width + textWidth) / speed) + 30; 
-                    result.DurationMs = (totalFrames * 50) + 1000; // Recalculate duration
+                    totalFrames = (int)((boxRect.Width + textWidth) / speed) + 60; 
+                    result.DurationMs = (totalFrames * 50) + 3000; // Recalculate duration
                 }
 
                 _logger.LogInformation($"[GIF Debug] Starting GIF Generation (Speed: {speed}, Frames: {totalFrames}, Filter: PaletteGen)");
@@ -5154,7 +5185,13 @@ namespace RetroBatMarqueeManager.Application.Services
                 string subFolder_inner = isHardcore ? "hc_overlays" : "overlays";
                 // Use the deterministic cachedGifPath instead of random timestamp
                 string gifPath = cachedGifPath;
+                
                 if (!Directory.Exists(Path.GetDirectoryName(gifPath)!)) Directory.CreateDirectory(Path.GetDirectoryName(gifPath)!);
+
+                // EN: Set GIF path in result (MPV will use GIF with :loop=-1 parameter)
+                // FR: Définir le chemin GIF dans le résultat (MPV utilisera GIF avec paramètre :loop=-1)
+                result.Path = gifPath;
+
 
                 // Initialize ffmpeg args for image2pipe
                 // Use palettegen/paletteuse for transparency support and high quality
@@ -5162,7 +5199,9 @@ namespace RetroBatMarqueeManager.Application.Services
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = ffmpegPath,
-                    Arguments = $"-y -f image2pipe -framerate 20 -i - -filter_complex \"[0:v] split [a][b];[a] palettegen=reserve_transparent=1 [p];[b][p] paletteuse\" -loop 0 \"{gifPath}\"",
+                    // EN: Use -loop 1 to play only once (narration)
+                    // FR: Utiliser -loop 1 pour ne jouer qu'une fois (narration)
+                    Arguments = $"-y -f image2pipe -framerate 20 -i - -filter_complex \"[0:v] split [a][b];[a] palettegen=reserve_transparent=1 [p];[b][p] paletteuse\" -loop 1 \"{gifPath}\"",
                     RedirectStandardInput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -5320,4 +5359,3 @@ namespace RetroBatMarqueeManager.Application.Services
 
     }
 }
-

@@ -926,6 +926,13 @@ namespace RetroBatMarqueeManager.Application.Services
                 _currentGameId = gameId;
                 _logger.LogInformation($"[RA Service] Game loaded: {_currentGameId} (from {Path.GetFileName(sourceLog)})");
                 
+                string? emulatorHint = null;
+                if (sourceLog.Contains("dolphin", StringComparison.OrdinalIgnoreCase)) emulatorHint = "dolphin";
+                else if (sourceLog.Contains("retroarch", StringComparison.OrdinalIgnoreCase)) emulatorHint = "retroarch";
+                else if (sourceLog.Contains("duckstation", StringComparison.OrdinalIgnoreCase)) emulatorHint = "duckstation";
+                else if (sourceLog.Contains("pcsx2", StringComparison.OrdinalIgnoreCase)) emulatorHint = "pcsx2";
+                else if (sourceLog.Contains("ppsspp", StringComparison.OrdinalIgnoreCase)) emulatorHint = "ppsspp";
+
                 // EN: Check for Hardcore status on specific emulator lines (PCSX2/DuckStation)
                 // FR: Vérifier statut Hardcore sur lignes émulateurs spécifiques (PCSX2/DuckStation)
                 if (line.Contains("hardcore enabled", StringComparison.OrdinalIgnoreCase))
@@ -937,13 +944,18 @@ namespace RetroBatMarqueeManager.Application.Services
                         HardcoreStatusChanged?.Invoke(this, _isHardcoreMode);
                     }
                 }
-                
-                string? emulatorHint = null;
-                if (sourceLog.Contains("dolphin", StringComparison.OrdinalIgnoreCase)) emulatorHint = "dolphin";
-                else if (sourceLog.Contains("retroarch", StringComparison.OrdinalIgnoreCase)) emulatorHint = "retroarch";
-                else if (sourceLog.Contains("duckstation", StringComparison.OrdinalIgnoreCase)) emulatorHint = "duckstation";
-                else if (sourceLog.Contains("pcsx2", StringComparison.OrdinalIgnoreCase)) emulatorHint = "pcsx2";
-                else if (sourceLog.Contains("ppsspp", StringComparison.OrdinalIgnoreCase)) emulatorHint = "ppsspp";
+                else if (emulatorHint == "duckstation" || emulatorHint == "retroarch")
+                {
+                    // EN: Proactively check config files if the log line is ambiguous (DuckStation starts logs with OFF then ON)
+                    // FR: Vérifier proactivement les fichiers de config si la ligne de log est ambiguë
+                    bool hcConfig = CheckHardcoreSettings(emulatorHint);
+                    if (_isHardcoreMode != hcConfig)
+                    {
+                        _isHardcoreMode = hcConfig;
+                        _logger.LogInformation($"[RA Service] Hardcore Mode DETECTED (via Config Check on GameLoad): {(_isHardcoreMode ? "ON" : "OFF")}");
+                        HardcoreStatusChanged?.Invoke(this, _isHardcoreMode);
+                    }
+                }
 
                 _ = LoadGameDataAsync(_currentGameId.Value, emulatorHint);
                 return;
